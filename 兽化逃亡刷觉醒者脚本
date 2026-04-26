@@ -1,0 +1,312 @@
+local CONFIG = {
+    ElevatorPosition = Vector3.new(-7712.548, 1468.536, 3.701),
+    WaitAfterEvent = 20,
+    TargetPosition = Vector3.new(-7624.936, 995.804, -134.774),
+    TeamCheckTime = 50,
+    Cooldown = 47,
+    TargetTeam = "Infected",
+}
+
+local NOTIFY_SOUND_ID = 4590657391
+local SOUND_VOLUME = 10
+
+local scriptRunning = true
+local stopRequested = false
+local stopReason = ""
+
+local function PlayNotifySound()
+    pcall(function()
+        local soundService = game:GetService("SoundService")
+        local debris = game:GetService("Debris")
+        
+        for i = 1, 3 do
+            local sound = Instance.new("Sound")
+            sound.Parent = soundService
+            sound.Volume = SOUND_VOLUME
+            sound.SoundId = "rbxassetid://" .. NOTIFY_SOUND_ID
+            sound.Playing = true
+            debris:AddItem(sound, 3)
+        end
+        print("[音频] 已播放提示音")
+    end)
+end
+
+local function CheckUIStatus()
+    local player = game.Players.LocalPlayer
+    if not player or not player.PlayerGui then return false end
+    
+    local main = player.PlayerGui:FindFirstChild("Main")
+    if not main then return false end
+    
+    local status = main:FindFirstChild("Status")
+    if not status then return false end
+    
+    local awakened = status:FindFirstChild("awakened")
+    local benign = status:FindFirstChild("benign")
+    local failed = status:FindFirstChild("failed")
+    
+    if awakened and awakened.Visible then
+        stopReason = "检测到觉醒者状态开启"
+        return true
+    end
+    
+    if benign and benign.Visible then
+        stopReason = "检测到善良状态开启"
+        return true
+    end
+    
+    if failed and failed.Visible then
+        stopReason = "检测到失败状态开启"
+        return true
+    end
+    
+    return false
+end
+
+local monitorConnection = nil
+
+local function StartGlobalMonitor()
+    print("")
+    print("========== 全局监控已启动 ==========")
+    print("监控文件: awakened / benign / failed")
+    print("监控属性: Visible")
+    print("一旦检测到立即停止所有脚本并播放音频")
+    print("====================================")
+    print("")
+    
+    monitorConnection = game:GetService("RunService").Heartbeat:Connect(function()
+        if not scriptRunning or stopRequested then
+            return
+        end
+        
+        if CheckUIStatus() then
+            stopRequested = true
+            scriptRunning = false
+            
+            print("")
+            print("==========================================")
+            print("  ⚠ 检测到状态开启！脚本立即停止 ⚠")
+            print("  停止原因: " .. stopReason)
+            print("==========================================")
+            print("")
+            
+            PlayNotifySound()
+            
+            if monitorConnection then
+                monitorConnection:Disconnect()
+            end
+        end
+    end)
+end
+
+local function GetCharacter()
+    local player = game.Players.LocalPlayer
+    return player and player.Character
+end
+
+local function GetRootPart()
+    local char = GetCharacter()
+    if char then
+        return char:FindFirstChild("HumanoidRootPart")
+    end
+    return nil
+end
+
+local function IsInfectedTeam()
+    local player = game.Players.LocalPlayer
+    if player and player.Team then
+        local teamName = player.Team.Name
+        return teamName == CONFIG.TargetTeam
+    end
+    return false
+end
+
+local function TeleportToPosition(position, posName)
+    if stopRequested or not scriptRunning then return false end
+    
+    local rootPart = GetRootPart()
+    if rootPart then
+        rootPart.CFrame = CFrame.new(position)
+        print("已传送到" .. posName)
+        return true
+    else
+        warn("传送失败：找不到HumanoidRootPart")
+        return false
+    end
+end
+
+local function FireGameEvent()
+    if stopRequested or not scriptRunning then return false end
+    
+    pcall(function()
+        local replicatedStorage = game:GetService("ReplicatedStorage")
+        local gameEvent = replicatedStorage:WaitForChild("GameEvent")
+        gameEvent:FireServer("Ready")
+        print("已触发GameEvent")
+    end)
+end
+
+local function WaitForTeam()
+    print("")
+    print("[队伍检测] 50秒内检测是否加入 " .. CONFIG.TargetTeam .. " 队伍")
+    
+    local startTime = tick()
+    local player = game.Players.LocalPlayer
+    
+    while tick() - startTime < CONFIG.TeamCheckTime do
+        if stopRequested or not scriptRunning then
+            return false
+        end
+        
+        task.wait(0.3)
+        
+        if IsInfectedTeam() then
+            print("[队伍检测] 已加入 " .. CONFIG.TargetTeam .. " 队伍")
+            return true
+        end
+    end
+    
+    print("[队伍检测] 50秒内未加入 " .. CONFIG.TargetTeam .. " 队伍")
+    return false
+end
+
+local function WaitCooldown()
+    print("")
+    print("冷却阶段: " .. CONFIG.Cooldown .. " 秒")
+    
+    for i = CONFIG.Cooldown, 1, -1 do
+        if stopRequested or not scriptRunning then
+            return
+        end
+        
+        if i % 10 == 0 or i <= 5 then
+            print("冷却剩余: " .. i .. " 秒")
+        end
+        task.wait(1)
+    end
+    
+    print("冷却结束，开始新一轮")
+end
+
+local function StopAll()
+    scriptRunning = false
+    print("")
+    print("==========================================")
+    print("  脚本已彻底停止")
+    print("==========================================")
+    if stopReason ~= "" then
+        print("停止原因: " .. stopReason)
+    else
+        print("停止原因: 50秒内未加入 " .. CONFIG.TargetTeam .. " 队伍")
+    end
+    print("==========================================")
+    print("")
+end
+
+local function Main()
+    local player = game.Players.LocalPlayer
+    
+    print("")
+    print("==========================================")
+    print("       觉醒者自动化脚本 v22.0")
+    print("     Visible属性监控版")
+    print("==========================================")
+    print("")
+    
+    StartGlobalMonitor()
+    
+    print("等待角色加载...")
+    repeat
+        task.wait(0.5)
+        if stopRequested or not scriptRunning then return end
+    until player.Character and player.Character:FindFirstChild("Humanoid") and 
+          player.Character:FindFirstChild("HumanoidRootPart")
+    
+    print("角色已就绪")
+    print("电梯坐标: " .. tostring(CONFIG.ElevatorPosition))
+    print("传送坐标: " .. tostring(CONFIG.TargetPosition))
+    print("目标队伍: " .. CONFIG.TargetTeam)
+    print("")
+    print("规则: 传送电梯 -> 触发事件 -> 等待20秒 -> 传送目标坐标 -> 队伍检测 -> 冷却")
+    print("  - 【全局监控】脚本启动后立即开始监控三个文件的Visible属性")
+    print("  - 一旦检测到 awakened/benign/failed 任意一个Visible变成true，立即停止并播放音频")
+    print("")
+    
+    local cycleCount = 0
+    
+    while scriptRunning and not stopRequested do
+        cycleCount = cycleCount + 1
+        print("========== 开始第 " .. cycleCount .. " 轮循环 ==========")
+        
+        if stopRequested or not scriptRunning then break end
+        
+        print("[1/4] 传送电梯...")
+        TeleportToPosition(CONFIG.ElevatorPosition, "电梯")
+        task.wait(0.5)
+        
+        if stopRequested or not scriptRunning then break end
+        
+        print("[2/4] 触发GameEvent...")
+        FireGameEvent()
+        
+        if stopRequested or not scriptRunning then break end
+        
+        print("[3/4] 等待20秒...")
+        for i = 20, 1, -1 do
+            if stopRequested or not scriptRunning then break end
+            if i % 5 == 0 or i <= 3 then
+                print("   剩余: " .. i .. " 秒")
+            end
+            task.wait(1)
+        end
+        
+        if stopRequested or not scriptRunning then break end
+        print("等待完成")
+        
+        print("[4/4] 传送目标坐标...")
+        TeleportToPosition(CONFIG.TargetPosition, "目标坐标")
+        task.wait(0.5)
+        
+        if stopRequested or not scriptRunning then break end
+        
+        print("")
+        print("========== 开始队伍检测（50秒倒计时）==========")
+        local teamSuccess = WaitForTeam()
+        
+        if stopRequested or not scriptRunning then
+            break
+        end
+        
+        if not teamSuccess then
+            StopAll()
+            return
+        end
+        
+        if stopRequested or not scriptRunning then break end
+        
+        print("")
+        print("==========================================")
+        print("  ✓ 已加入 " .. CONFIG.TargetTeam .. " 队伍，开始冷却")
+        print("==========================================")
+        WaitCooldown()
+    end
+    
+    if stopRequested then
+        StopAll()
+    end
+end
+
+print("正在启动Visible属性监控版脚本...")
+print("监控文件: awakened / benign / failed")
+print("监控属性: Visible")
+print("触发动作: 立即停止所有循环 + 播放音频4590657391")
+
+local success, err = pcall(Main)
+
+if not success then
+    print("")
+    print("脚本异常停止: " .. tostring(err))
+    PlayNotifySound()
+end
+
+print("脚本执行完毕")
