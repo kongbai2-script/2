@@ -1,0 +1,1512 @@
+local repo = 'https://raw.githubusercontent.com/mstudio45/Obsidian/main/'
+local Library = loadstring(game:HttpGet(repo .. 'Library.lua'))()
+local ThemeManager = loadstring(game:HttpGet(repo .. 'addons/ThemeManager.lua'))()
+local SaveManager = loadstring(game:HttpGet(repo .. 'addons/SaveManager.lua'))()
+
+local player = game:GetService("Players").LocalPlayer
+local runService = game:GetService("RunService")
+local userInputService = game:GetService("UserInputService")
+local lighting = game:GetService("Lighting")
+
+local notifysound = 4590657391
+local PlayingSound = true
+
+function Sound()
+    local sound = Instance.new("Sound", game:GetService("SoundService"))
+    sound.Volume = 2.5
+    sound.SoundId = "rbxassetid://" .. notifysound
+    sound.Playing = PlayingSound and true or false
+    game:GetService("Debris"):AddItem(sound, 2)
+end
+
+Sound()
+
+getgenv().KeycardESP = {
+    Enabled = false
+}
+
+getgenv().ItemESP = {
+    Enabled = false
+}
+
+getgenv().EnemyLock = {
+    Enabled = false
+}
+
+getgenv().LiquidDelete = {
+    Enabled = false
+}
+
+getgenv().DoorESP = {
+    Enabled = false
+}
+
+getgenv().DoorNoCollide = {
+    Enabled = false
+}
+
+getgenv().SmoothBlockDelete = {
+    Enabled = false
+}
+
+getgenv().InteractionNoCollide = {
+    Enabled = false
+}
+
+getgenv().NPCEP = {
+    Enabled = false
+}
+
+getgenv().KillAura = {
+    Enabled = false,
+    SelectedWeapon = "Fists"
+}
+
+getgenv().SampleDetection = {
+    Enabled = false
+}
+
+local originalSpeeds = {}
+local doorESPed = {}
+local processedDoors = {}
+local doorCanCollideBackup = {}
+local processedBlocks = {}
+local processedInteractions = {}
+local interactionCanCollideBackup = {}
+local processedKeycards = {}
+local processedNPCs = {}
+
+local keycardLoopConnection = nil
+local keycardScanning = false
+local enemyLoopConnection = nil
+local npcLoopConnection = nil
+local npcScanning = false
+
+local killAuraRunning = false
+local killAuraThread = nil
+local killAuraRemote = nil
+local killAuraAttackPart = nil
+
+local sampleDetectionActive = false
+local sampleDetectionThread = nil
+local sampleAddedConnection = nil
+local sampleRemovedConnection = nil
+local notifiedSamples = {}
+local sampleCountLabel = nil
+
+local AwakenerSkins = {
+    "Cat", "Dog", "Wolf", "Bunny", "Cone", "White", "Dark", "Deer",
+    "Cola", "Apple", "Dragon", "Squid Dog", "Snow Leopard", "Tiger Shark",
+    "Festive Cat", "Candy Cane", "Protogen", "Pumpkin", "Undead", "Shattered"
+}
+
+local function GetRemoteEvent()
+    local success, remote = pcall(function()
+        return workspace.Lobby.Lab.Console.RemoteEvent
+    end)
+    if success and remote then
+        return remote
+    end
+    return nil
+end
+
+local function ForceBecomeAwakener(skinName)
+    local remote = GetRemoteEvent()
+    if remote then
+        remote:FireServer(skinName)
+        Library:Notify("已切换觉醒者皮肤: " .. skinName, 2)
+        if PlayingSound then Sound() end
+        return true
+    else
+        Library:Notify("未找到觉醒者控制台，请确保在大厅", 2)
+        return false
+    end
+end
+
+local function GetSampleId(sample)
+    return tostring(sample)
+end
+
+local function GetAllSamples()
+    local samples = {}
+    local map = workspace:FindFirstChild("Map")
+    if not map then return samples end
+    
+    for _, child in ipairs(map:GetChildren()) do
+        if child.Name == "Sample" then
+            table.insert(samples, child)
+        end
+    end
+    return samples
+end
+
+local function GetSampleCount()
+    local map = workspace:FindFirstChild("Map")
+    if not map then return 0 end
+    
+    local count = 0
+    for _, child in ipairs(map:GetChildren()) do
+        if child.Name == "Sample" then
+            count = count + 1
+        end
+    end
+    return count
+end
+
+local function UpdateSampleCountDisplay()
+    if sampleCountLabel then
+        local count = GetSampleCount()
+        sampleCountLabel:SetText("样本数量: " .. count)
+    end
+end
+
+local function NotifySample(count, isNew)
+    if isNew then
+        Library:Notify("样本已刷新，当前共 " .. count .. " 个", 2)
+    end
+    if PlayingSound then Sound() end
+end
+
+local function FullScan()
+    local map = workspace:FindFirstChild("Map")
+    if not map then 
+        UpdateSampleCountDisplay()
+        return 
+    end
+    
+    local currentSampleIds = {}
+    local newSamplesFound = false
+    
+    for _, sample in ipairs(GetAllSamples()) do
+        local sampleId = GetSampleId(sample)
+        currentSampleIds[sampleId] = true
+        
+        if not notifiedSamples[sampleId] then
+            notifiedSamples[sampleId] = {
+                id = sampleId,
+                firstSeen = tick(),
+                instance = sample
+            }
+            newSamplesFound = true
+        end
+    end
+    
+    for sampleId, _ in pairs(notifiedSamples) do
+        if not currentSampleIds[sampleId] then
+            notifiedSamples[sampleId] = nil
+        end
+    end
+    
+    local currentCount = GetSampleCount()
+    UpdateSampleCountDisplay()
+    
+    if newSamplesFound then
+        NotifySample(currentCount, true)
+    end
+    
+    return currentCount
+end
+
+local function StartPeriodicScan()
+    sampleDetectionThread = task.spawn(function()
+        while sampleDetectionActive and getgenv().SampleDetection.Enabled do
+            FullScan()
+            task.wait(0.3)
+        end
+    end)
+end
+
+local function OnSampleRemoved(sample)
+    local sampleId = GetSampleId(sample)
+    if notifiedSamples[sampleId] then
+        notifiedSamples[sampleId] = nil
+        local remainingCount = GetSampleCount()
+        UpdateSampleCountDisplay()
+        if PlayingSound then Sound() end
+    end
+end
+
+local function StartSampleDetection()
+    if sampleDetectionActive then return end
+    if not getgenv().SampleDetection.Enabled then return end
+    
+    sampleDetectionActive = true
+    notifiedSamples = {}
+    
+    local initialCount = FullScan()
+    StartPeriodicScan()
+    
+    local function SetupListeners(map)
+        sampleAddedConnection = map.ChildAdded:Connect(function(child)
+            if not getgenv().SampleDetection.Enabled then return end
+            if child.Name == "Sample" then
+                FullScan()
+            end
+        end)
+        
+        sampleRemovedConnection = map.ChildRemoved:Connect(function(child)
+            if not getgenv().SampleDetection.Enabled then return end
+            if child.Name == "Sample" then
+                OnSampleRemoved(child)
+            end
+        end)
+    end
+    
+    local map = workspace:FindFirstChild("Map")
+    if map then
+        SetupListeners(map)
+    else
+        local mapWaitConnection
+        mapWaitConnection = workspace.ChildAdded:Connect(function(child)
+            if child.Name == "Map" then
+                SetupListeners(child)
+                mapWaitConnection:Disconnect()
+                FullScan()
+            end
+        end)
+    end
+    
+    Library:Notify('样本检测已启用，当前样本数量: ' .. initialCount, 2)
+end
+
+local function StopSampleDetection()
+    sampleDetectionActive = false
+    
+    if sampleDetectionThread then
+        task.cancel(sampleDetectionThread)
+        sampleDetectionThread = nil
+    end
+    
+    if sampleAddedConnection then
+        sampleAddedConnection:Disconnect()
+        sampleAddedConnection = nil
+    end
+    
+    if sampleRemovedConnection then
+        sampleRemovedConnection:Disconnect()
+        sampleRemovedConnection = nil
+    end
+    
+    notifiedSamples = {}
+    
+    if sampleCountLabel then
+        sampleCountLabel:SetText("样本数量: 0")
+    end
+    
+    Library:Notify('样本检测已禁用', 2)
+end
+
+local function ToggleSampleDetection()
+    if getgenv().SampleDetection.Enabled then
+        StartSampleDetection()
+    else
+        StopSampleDetection()
+    end
+end
+
+local function ForceScan()
+    local count = FullScan()
+    Library:Notify("强制扫描完成，当前样本数量: " .. count, 2)
+    if PlayingSound then Sound() end
+end
+
+local AvailableWeapons = {
+    {Name = "拳头", Value = "Fists"},
+    {Name = "困难模式利爪", Value = "Claws"},
+    {Name = "利爪", Value = "Claws..."}
+}
+
+local function GetSelectedWeapon()
+    if not player.Character then return nil end
+    local weaponName = getgenv().KillAura.SelectedWeapon or "Fists"
+    local weapon = player.Character:FindFirstChild(weaponName)
+    if weapon then return weapon end
+    local backpackWeapon = player.Backpack:FindFirstChild(weaponName)
+    if backpackWeapon then
+        backpackWeapon.Parent = player.Character
+        task.wait(0.1)
+        return player.Character:FindFirstChild(weaponName)
+    end
+    return nil
+end
+
+local function GetWeaponValue(displayName)
+    for _, weapon in ipairs(AvailableWeapons) do
+        if weapon.Name == displayName then
+            return weapon.Value
+        end
+    end
+    return "Fists"
+end
+
+local function GetWeaponDisplayName(value)
+    for _, weapon in ipairs(AvailableWeapons) do
+        if weapon.Value == value then
+            return weapon.Name
+        end
+    end
+    return "拳头"
+end
+
+local function InitKillAura()
+    local weapon = GetSelectedWeapon()
+    if not weapon then
+        Library:Notify('未找到武器: ' .. GetWeaponDisplayName(getgenv().KillAura.SelectedWeapon) .. '，请确保手持该武器', 2)
+        return false
+    end
+    
+    local remote = weapon:FindFirstChild("RemoteEvent")
+    if not remote then
+        Library:Notify('武器没有RemoteEvent', 2)
+        return false
+    end
+    
+    local attackPart = weapon:FindFirstChild("ClawL")
+    if not attackPart then
+        attackPart = weapon:FindFirstChild("ClawR")
+    end
+    if not attackPart then
+        attackPart = weapon
+    end
+    
+    killAuraRemote = remote
+    killAuraAttackPart = attackPart
+    
+    Library:Notify('杀戮光环已初始化 | 武器: ' .. GetWeaponDisplayName(getgenv().KillAura.SelectedWeapon), 2)
+    return true
+end
+
+local function StartKillAura()
+    if killAuraRunning then return end
+    if not getgenv().KillAura.Enabled then return end
+    
+    if not InitKillAura() then
+        Library:Notify('杀戮光环初始化失败，请确保手持武器后重新开启', 2)
+        return
+    end
+    
+    killAuraRunning = true
+    
+    killAuraThread = task.spawn(function()
+        while killAuraRunning and getgenv().KillAura.Enabled do
+            local success = pcall(function()
+                local enemyFolder = workspace:FindFirstChild("Enemy")
+                if enemyFolder then
+                    for _, enemy in ipairs(enemyFolder:GetChildren()) do
+                        if not killAuraRunning then break end
+                        local humanoid = enemy:FindFirstChild("Humanoid")
+                        if humanoid and humanoid.Health > 0 then
+                            local targetPart = enemy:FindFirstChild("Head")
+                            if not targetPart then
+                                targetPart = enemy:FindFirstChild("HumanoidRootPart")
+                            end
+                            if targetPart then
+                                killAuraRemote:FireServer(killAuraAttackPart, targetPart, humanoid, "1", "2")
+                            end
+                        end
+                    end
+                end
+            end)
+            if not success then
+                killAuraRunning = false
+                break
+            end
+            task.wait(0.05)
+        end
+    end)
+end
+
+local function StopKillAura()
+    killAuraRunning = false
+    if killAuraThread then
+        task.cancel(killAuraThread)
+        killAuraThread = nil
+    end
+    killAuraRemote = nil
+    killAuraAttackPart = nil
+end
+
+local function toggleKillAura()
+    if getgenv().KillAura.Enabled then
+        StartKillAura()
+    else
+        StopKillAura()
+    end
+end
+
+local function AddKeycardESP(keycard)
+    if processedKeycards[keycard] then return end
+    processedKeycards[keycard] = true
+    local existingTag = keycard:FindFirstChild("KeycardTag")
+    if existingTag then existingTag:Destroy() end
+    local billboard = Instance.new("BillboardGui")
+    billboard.Name = "KeycardTag"
+    billboard.Parent = keycard
+    billboard.Size = UDim2.new(0, 120, 0, 35)
+    billboard.AlwaysOnTop = true
+    billboard.StudsOffset = Vector3.new(0, 0.8, 0)
+    billboard.ZIndexBehavior = Enum.ZIndexBehavior.Global
+    local text = Instance.new("TextLabel")
+    text.Parent = billboard
+    text.Size = UDim2.new(1, 0, 1, 0)
+    text.BackgroundTransparency = 1
+    text.Text = "钥匙卡"
+    text.TextColor3 = Color3.fromRGB(255, 165, 0)
+    text.TextScaled = true
+    text.Font = Enum.Font.GothamBold
+    text.TextStrokeTransparency = 0.2
+    text.TextStrokeColor3 = Color3.fromRGB(0, 0, 0)
+end
+
+local function DestroyKeycardESP()
+    local map = workspace:FindFirstChild("Map")
+    if map then
+        for _, obj in ipairs(map:GetDescendants()) do
+            if obj:IsA("BillboardGui") and obj.Name == "KeycardTag" then
+                obj:Destroy()
+            end
+        end
+    end
+    processedKeycards = {}
+end
+
+local function StartKeycardESP()
+    if keycardScanning then return end
+    if not getgenv().KeycardESP.Enabled then return end
+    keycardScanning = true
+    DestroyKeycardESP()
+    keycardLoopConnection = task.spawn(function()
+        while keycardScanning and getgenv().KeycardESP.Enabled do
+            local map = workspace:FindFirstChild("Map")
+            if map then
+                for i = 0, 30 do
+                    local outer = map:FindFirstChild(tostring(i))
+                    if outer then
+                        for _, obj in ipairs(outer:GetDescendants()) do
+                            if obj.Name == "Keycard" and obj:IsA("BasePart") then
+                                AddKeycardESP(obj)
+                            end
+                        end
+                    end
+                end
+            end
+            task.wait(0.5)
+        end
+    end)
+end
+
+local function StopKeycardESP()
+    keycardScanning = false
+    if keycardLoopConnection then
+        task.cancel(keycardLoopConnection)
+        keycardLoopConnection = nil
+    end
+    DestroyKeycardESP()
+end
+
+local function toggleKeycardESP()
+    if getgenv().KeycardESP.Enabled then
+        StartKeycardESP()
+    else
+        StopKeycardESP()
+    end
+end
+
+local function AddNPCEP(npc)
+    if processedNPCs[npc] then return end
+    processedNPCs[npc] = true
+    local existingTag = npc:FindFirstChild("NPCTag")
+    if existingTag then existingTag:Destroy() end
+    local billboard = Instance.new("BillboardGui")
+    billboard.Name = "NPCTag"
+    billboard.Parent = npc
+    billboard.Size = UDim2.new(0, 100, 0, 35)
+    billboard.AlwaysOnTop = true
+    billboard.StudsOffset = Vector3.new(0, 2.5, 0)
+    billboard.ZIndexBehavior = Enum.ZIndexBehavior.Global
+    local text = Instance.new("TextLabel")
+    text.Parent = billboard
+    text.Size = UDim2.new(1, 0, 1, 0)
+    text.BackgroundTransparency = 1
+    text.Text = "怪物"
+    text.TextColor3 = Color3.fromRGB(255, 0, 0)
+    text.TextScaled = true
+    text.Font = Enum.Font.GothamBold
+    text.TextStrokeTransparency = 0.2
+    text.TextStrokeColor3 = Color3.fromRGB(0, 0, 0)
+end
+
+local function DestroyNPCEP()
+    local enemyFolder = workspace:FindFirstChild("Enemy")
+    if enemyFolder then
+        for _, obj in ipairs(enemyFolder:GetDescendants()) do
+            if obj:IsA("BillboardGui") and obj.Name == "NPCTag" then
+                obj:Destroy()
+            end
+        end
+    end
+    processedNPCs = {}
+end
+
+local function StartNPCEP()
+    if npcScanning then return end
+    if not getgenv().NPCEP.Enabled then return end
+    npcScanning = true
+    DestroyNPCEP()
+    local enemyFolder = workspace:FindFirstChild("Enemy")
+    if enemyFolder then
+        for _, npc in ipairs(enemyFolder:GetChildren()) do
+            if npc:FindFirstChild("Humanoid") then
+                AddNPCEP(npc)
+            end
+        end
+    end
+    npcLoopConnection = task.spawn(function()
+        while npcScanning and getgenv().NPCEP.Enabled do
+            local enemyFolder = workspace:FindFirstChild("Enemy")
+            if enemyFolder then
+                for _, npc in ipairs(enemyFolder:GetChildren()) do
+                    if npc:FindFirstChild("Humanoid") and not processedNPCs[npc] then
+                        AddNPCEP(npc)
+                    end
+                end
+            end
+            task.wait(0.5)
+        end
+    end)
+end
+
+local function StopNPCEP()
+    npcScanning = false
+    if npcLoopConnection then
+        task.cancel(npcLoopConnection)
+        npcLoopConnection = nil
+    end
+    DestroyNPCEP()
+end
+
+local function toggleNPCEP()
+    if getgenv().NPCEP.Enabled then
+        StartNPCEP()
+    else
+        StopNPCEP()
+    end
+end
+
+local function createItemESP()
+    if not getgenv().ItemESP.Enabled then return end
+    local map = workspace:FindFirstChild("Map")
+    if not map then return end
+    for _, item in ipairs(map:GetChildren()) do
+        if item:IsA("Tool") then
+            local tag = item:FindFirstChild("ItemTag")
+            if not tag then
+                local billboard = Instance.new("BillboardGui")
+                billboard.Name = "ItemTag"
+                billboard.Parent = item
+                billboard.Size = UDim2.new(0, 120, 0, 30)
+                billboard.AlwaysOnTop = true
+                billboard.StudsOffset = Vector3.new(0, 2, 0)
+                local text = Instance.new("TextLabel")
+                text.Parent = billboard
+                text.Size = UDim2.new(1, 0, 1, 0)
+                text.BackgroundTransparency = 1
+                text.TextColor3 = Color3.fromRGB(0, 255, 0)
+                text.TextScaled = true
+                text.Text = item.Name
+                text.Font = Enum.Font.GothamBold
+                text.TextStrokeTransparency = 0.3
+                text.TextStrokeColor3 = Color3.fromRGB(0, 0, 0)
+            end
+        end
+    end
+end
+
+local function destroyItemESP()
+    local map = workspace:FindFirstChild("Map")
+    if map then
+        for _, item in ipairs(map:GetChildren()) do
+            if item:IsA("Tool") then
+                local tag = item:FindFirstChild("ItemTag")
+                if tag then tag:Destroy() end
+            end
+        end
+    end
+end
+
+local enemyLockActive = false
+local enemyLockConnection = nil
+
+local function LockEnemySpeed()
+    if not getgenv().EnemyLock.Enabled then return end
+    
+    local enemyFolder = workspace:FindFirstChild("Enemy")
+    if not enemyFolder then return end
+    
+    for _, enemy in ipairs(enemyFolder:GetChildren()) do
+        local humanoid = enemy:FindFirstChild("Humanoid")
+        if humanoid and humanoid.Health > 0 then
+            if not originalSpeeds[humanoid] then
+                originalSpeeds[humanoid] = humanoid.WalkSpeed
+            end
+            if humanoid.WalkSpeed ~= 0 then
+                humanoid.WalkSpeed = 0
+            end
+        end
+    end
+end
+
+local function RestoreEnemySpeed()
+    local enemyFolder = workspace:FindFirstChild("Enemy")
+    if enemyFolder then
+        for _, enemy in ipairs(enemyFolder:GetChildren()) do
+            local humanoid = enemy:FindFirstChild("Humanoid")
+            if humanoid and originalSpeeds[humanoid] then
+                humanoid.WalkSpeed = originalSpeeds[humanoid]
+                originalSpeeds[humanoid] = nil
+            elseif humanoid and humanoid.WalkSpeed == 0 then
+                humanoid.WalkSpeed = 16
+            end
+        end
+    end
+    originalSpeeds = {}
+end
+
+local function StartEnemyLock()
+    if enemyLockActive then return end
+    if not getgenv().EnemyLock.Enabled then return end
+    
+    enemyLockActive = true
+    enemyLockConnection = runService.RenderStepped:Connect(LockEnemySpeed)
+    Library:Notify('怪物锁定已启用', 2)
+end
+
+local function StopEnemyLock()
+    enemyLockActive = false
+    if enemyLockConnection then
+        enemyLockConnection:Disconnect()
+        enemyLockConnection = nil
+    end
+    RestoreEnemySpeed()
+    Library:Notify('怪物锁定已禁用', 2)
+end
+
+local function ToggleEnemyLock()
+    if getgenv().EnemyLock.Enabled then
+        StartEnemyLock()
+    else
+        StopEnemyLock()
+    end
+end
+
+local liquidConnection = nil
+local function startLiquidDelete()
+    if liquidConnection then liquidConnection:Disconnect() end
+    liquidConnection = runService.RenderStepped:Connect(function()
+        if not getgenv().LiquidDelete.Enabled then return end
+        local map = workspace:FindFirstChild("Map")
+        if not map then return end
+        for _, child in ipairs(map:GetChildren()) do
+            local hazard = child:FindFirstChild("Hazard")
+            if hazard then
+                for _, obj in ipairs(hazard:GetChildren()) do
+                    pcall(function() obj:Destroy() end)
+                end
+            end
+        end
+    end)
+end
+
+local function stopLiquidDelete()
+    if liquidConnection then
+        liquidConnection:Disconnect()
+        liquidConnection = nil
+    end
+end
+
+local function AddDoorESP(part)
+    if doorESPed[part] then return end
+    doorESPed[part] = true
+    pcall(function()
+        part.Color = Color3.new(0, 0.5, 1)
+        part.Material = Enum.Material.Neon
+    end)
+    local bill = Instance.new("BillboardGui")
+    bill.Name = "Door1ESP"
+    bill.Size = UDim2.new(0, 120, 0, 40)
+    bill.StudsOffset = Vector3.new(0, 2.5, 0)
+    bill.AlwaysOnTop = true
+    bill.ZIndexBehavior = Enum.ZIndexBehavior.Global
+    bill.Parent = part
+    local txt = Instance.new("TextLabel")
+    txt.Size = UDim2.new(1, 0, 1, 0)
+    txt.BackgroundTransparency = 1
+    txt.Text = "门"
+    txt.TextColor3 = Color3.new(0, 0.5, 1)
+    txt.TextSize = 20
+    txt.Font = Enum.Font.GothamBold
+    txt.TextStrokeTransparency = 0
+    txt.TextStrokeColor3 = Color3.new(0, 0, 0)
+    txt.Parent = bill
+end
+
+local function destroyDoorESP()
+    local map = workspace:FindFirstChild("Map")
+    if map then
+        for _, obj in ipairs(map:GetDescendants()) do
+            if obj:IsA("BillboardGui") and obj.Name == "Door1ESP" then
+                obj:Destroy()
+            end
+        end
+    end
+    doorESPed = {}
+end
+
+local function updateDoorESP()
+    if not getgenv().DoorESP.Enabled then return end
+    local map = workspace:FindFirstChild("Map")
+    if not map then return end
+    for a = 0, 30 do
+        local m = map:FindFirstChild(tostring(a))
+        if m then
+            for b = 0, 30 do
+                local n = m:FindFirstChild(tostring(b))
+                if n then
+                    local door1 = n:FindFirstChild("Door1")
+                    if door1 and door1:IsA("BasePart") then
+                        AddDoorESP(door1)
+                    end
+                end
+            end
+        end
+    end
+    for a = 0, 30 do
+        local m = map:FindFirstChild(tostring(a))
+        if m then
+            local gate = m:FindFirstChild("Gate")
+            if gate then
+                local door1 = gate:FindFirstChild("Door1")
+                if door1 and door1:IsA("BasePart") then
+                    AddDoorESP(door1)
+                end
+            end
+        end
+    end
+end
+
+local doorNoCollideRunning = false
+local doorScanningThread = nil
+
+local function MakeDoorPassable(doorModel)
+    if processedDoors[doorModel] then return end
+    processedDoors[doorModel] = true
+    if not doorCanCollideBackup[doorModel] then
+        local backup = {}
+        for _, part in pairs(doorModel:GetDescendants()) do
+            if part:IsA("BasePart") then
+                backup[part] = part.CanCollide
+            end
+        end
+        doorCanCollideBackup[doorModel] = backup
+    end
+    for _, part in pairs(doorModel:GetDescendants()) do
+        if part:IsA("BasePart") and part.CanCollide then
+            part.CanCollide = false
+        end
+    end
+end
+
+local function RestoreDoorCollision(doorModel)
+    local backup = doorCanCollideBackup[doorModel]
+    if not backup then return end
+    for part, originalCollide in pairs(backup) do
+        if part and part:IsA("BasePart") then
+            part.CanCollide = originalCollide
+        end
+    end
+end
+
+local function RestoreAllDoors()
+    for doorModel, _ in pairs(processedDoors) do
+        RestoreDoorCollision(doorModel)
+    end
+    processedDoors = {}
+    doorCanCollideBackup = {}
+end
+
+local function startDoorNoCollide()
+    if doorNoCollideRunning then
+        stopDoorNoCollide()
+    end
+    if not getgenv().DoorNoCollide.Enabled then return end
+    doorNoCollideRunning = true
+    doorScanningThread = task.spawn(function()
+        while not workspace:FindFirstChild("Map") and doorNoCollideRunning do
+            task.wait(0.5)
+        end
+        if not doorNoCollideRunning then return end
+        local Map = workspace.Map
+        while doorNoCollideRunning and getgenv().DoorNoCollide.Enabled do
+            for i = 0, 30 do
+                if not doorNoCollideRunning then break end
+                local num = tostring(i)
+                local outer = Map:FindFirstChild(num)
+                if outer then
+                    local door = outer:FindFirstChild(num)
+                    if door then
+                        MakeDoorPassable(door)
+                    end
+                end
+            end
+            task.wait(0.5)
+        end
+    end)
+end
+
+local function stopDoorNoCollide()
+    doorNoCollideRunning = false
+    if doorScanningThread then
+        task.cancel(doorScanningThread)
+        doorScanningThread = nil
+    end
+    RestoreAllDoors()
+end
+
+local function toggleDoorNoCollide()
+    if getgenv().DoorNoCollide.Enabled then
+        startDoorNoCollide()
+    else
+        stopDoorNoCollide()
+    end
+end
+
+local smoothBlockDeleteConn = nil
+
+local function DeleteSmoothBlock(block)
+    if processedBlocks[block] then return end
+    processedBlocks[block] = true
+    pcall(function() block:Destroy() end)
+end
+
+local function startSmoothBlockDelete()
+    if smoothBlockDeleteConn then 
+        smoothBlockDeleteConn:Disconnect()
+        smoothBlockDeleteConn = nil
+    end
+    if not getgenv().SmoothBlockDelete.Enabled then return end
+    smoothBlockDeleteConn = runService.RenderStepped:Connect(function()
+        if not getgenv().SmoothBlockDelete.Enabled then return end
+        local map = workspace:FindFirstChild("Map")
+        if not map then return end
+        for i = 0, 30 do
+            local num = tostring(i)
+            local outer = map:FindFirstChild(num)
+            if outer then
+                local interaction = outer:FindFirstChild("Interaction")
+                if interaction then
+                    local block = interaction:FindFirstChild("Smooth Block Model")
+                    if block then
+                        DeleteSmoothBlock(block)
+                    end
+                end
+            end
+        end
+    end)
+end
+
+local function stopSmoothBlockDelete()
+    if smoothBlockDeleteConn then
+        smoothBlockDeleteConn:Disconnect()
+        smoothBlockDeleteConn = nil
+    end
+    processedBlocks = {}
+end
+
+local function toggleSmoothBlockDelete()
+    if getgenv().SmoothBlockDelete.Enabled then
+        startSmoothBlockDelete()
+    else
+        stopSmoothBlockDelete()
+    end
+end
+
+local interactionNoCollideRunning = false
+local interactionScanningThread = nil
+
+local function MakeInteractionPassable(item)
+    if processedInteractions[item] then return end
+    processedInteractions[item] = true
+    if not interactionCanCollideBackup[item] then
+        local backup = {}
+        for _, part in pairs(item:GetDescendants()) do
+            if part:IsA("BasePart") then
+                backup[part] = part.CanCollide
+            end
+        end
+        interactionCanCollideBackup[item] = backup
+    end
+    for _, part in pairs(item:GetDescendants()) do
+        if part:IsA("BasePart") and part.CanCollide then
+            part.CanCollide = false
+        end
+    end
+end
+
+local function RestoreInteractionCollision(item)
+    local backup = interactionCanCollideBackup[item]
+    if not backup then return end
+    for part, originalCollide in pairs(backup) do
+        if part and part:IsA("BasePart") then
+            part.CanCollide = originalCollide
+        end
+    end
+end
+
+local function RestoreAllInteractions()
+    for item, _ in pairs(processedInteractions) do
+        RestoreInteractionCollision(item)
+    end
+    processedInteractions = {}
+    interactionCanCollideBackup = {}
+end
+
+local function startInteractionNoCollide()
+    if interactionNoCollideRunning then
+        stopInteractionNoCollide()
+    end
+    if not getgenv().InteractionNoCollide.Enabled then return end
+    interactionNoCollideRunning = true
+    interactionScanningThread = task.spawn(function()
+        while not workspace:FindFirstChild("Map") and interactionNoCollideRunning do
+            task.wait(0.5)
+        end
+        if not interactionNoCollideRunning then return end
+        local Map = workspace.Map
+        while interactionNoCollideRunning and getgenv().InteractionNoCollide.Enabled do
+            for i = 0, 30 do
+                if not interactionNoCollideRunning then break end
+                local room = Map:FindFirstChild(tostring(i))
+                if room then
+                    local interaction = room:FindFirstChild("Interaction")
+                    if interaction then
+                        for _, obj in ipairs(interaction:GetChildren()) do
+                            if obj.Name == "Interaction" or obj:IsA("BasePart") then
+                                MakeInteractionPassable(obj)
+                            end
+                        end
+                    end
+                end
+            end
+            task.wait(0.5)
+        end
+    end)
+end
+
+local function stopInteractionNoCollide()
+    interactionNoCollideRunning = false
+    if interactionScanningThread then
+        task.cancel(interactionScanningThread)
+        interactionScanningThread = nil
+    end
+    RestoreAllInteractions()
+end
+
+local function toggleInteractionNoCollide()
+    if getgenv().InteractionNoCollide.Enabled then
+        startInteractionNoCollide()
+    else
+        stopInteractionNoCollide()
+    end
+end
+
+local function AutoPickupKeycard()
+    local mapFolder = workspace:WaitForChild("Map")
+    local char = player.Character
+    if not char then 
+        Library:Notify("未找到角色", 2)
+        return 
+    end
+    local hrp = char:FindFirstChild("HumanoidRootPart")
+    if not hrp then 
+        Library:Notify("未找到HumanoidRootPart", 2)
+        return 
+    end
+
+    local startPos = hrp.CFrame
+    local playerPos = hrp.Position
+    local nearestPrompt = nil
+    local nearestDist = math.huge
+    local nearestParent = nil
+
+    for i = 0, 30 do
+        local room = mapFolder:FindFirstChild(tostring(i))
+        if room and room:IsA("Model") then
+            for _, v in pairs(room:GetDescendants()) do
+                if v:IsA("ProximityPrompt") and v.ObjectText == "Keycard" and v.Enabled then
+                    local parent = v.Parent
+                    if parent and parent.Name == "Keycard" and parent:IsA("UnionOperation") then
+                        local card = parent.Parent
+                        if card and card.Name == "Card" and card:IsA("Folder") then
+                            local dist = (parent.Position - playerPos).Magnitude
+                            if dist < nearestDist then
+                                nearestDist = dist
+                                nearestPrompt = v
+                                nearestParent = parent
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    if nearestPrompt and nearestParent then
+        hrp.CFrame = nearestParent.CFrame * CFrame.new(0, 0, 2)
+        task.wait(0.3)
+        fireproximityprompt(nearestPrompt)
+        task.wait(0.3)
+        fireproximityprompt(nearestPrompt)
+        task.wait(0.5)
+        hrp.CFrame = startPos
+        Library:Notify("已自动拾取钥匙卡", 2)
+        if PlayingSound then Sound() end
+    else
+        Library:Notify("未找到钥匙卡", 2)
+        if PlayingSound then Sound() end
+    end
+end
+
+local function AutoSwipeCard()
+    local mapFolder = workspace:WaitForChild("Map")
+    local char = player.Character
+    if not char then 
+        Library:Notify("未找到角色", 2)
+        return 
+    end
+    local hrp = char:FindFirstChild("HumanoidRootPart")
+    if not hrp then 
+        Library:Notify("未找到HumanoidRootPart", 2)
+        return 
+    end
+
+    local startPos = hrp.CFrame
+    local found = false
+
+    for i = 0, 30 do
+        local room = mapFolder:FindFirstChild(tostring(i))
+        if room and room:IsA("Model") and not found then
+            for _, v in pairs(room:GetDescendants()) do
+                if v.Name == "Part2" and v:IsA("BasePart") then
+                    local prompt = v:FindFirstChild("_ProximityPrompt")
+                    if prompt and prompt:IsA("ProximityPrompt") and prompt.Enabled then
+                        hrp.CFrame = v.CFrame * CFrame.new(0, 0, 2)
+                        task.wait(0.3)
+                        fireproximityprompt(prompt)
+                        task.wait(0.8)
+                        fireproximityprompt(prompt)
+                        task.wait(0.5)
+                        hrp.CFrame = startPos
+                        Library:Notify("已自动刷卡", 2)
+                        if PlayingSound then Sound() end
+                        found = true
+                        break
+                    end
+                end
+            end
+        end
+    end
+
+    if not found then
+        Library:Notify("未找到刷卡器", 2)
+        if PlayingSound then Sound() end
+    end
+end
+
+local Window = Library:CreateWindow({
+    Title = '兽化逃亡脚本 作者:空白',
+    Center = true,
+    ToggleKeybind = Enum.KeyCode.RightShift,
+    AutoShow = true
+})
+
+local Options = Library.Options
+local Toggles = Library.Toggles
+
+local MainTab = Window:AddTab('功能列表')
+local UISettingsTab = Window:AddTab('UI设置')
+local AwakenerTab = Window:AddTab('觉醒者变身')
+
+local AwakenerGroupLeft = AwakenerTab:AddLeftGroupbox('觉醒者皮肤')
+local AwakenerGroupRight = AwakenerTab:AddRightGroupbox('觉醒者皮肤')
+
+local leftSkins = {}
+local rightSkins = {}
+
+for i, skin in ipairs(AwakenerSkins) do
+    if i <= 10 then
+        table.insert(leftSkins, skin)
+    else
+        table.insert(rightSkins, skin)
+    end
+end
+
+for _, skinName in ipairs(leftSkins) do
+    AwakenerGroupLeft:AddButton({
+        Text = skinName,
+        Func = function()
+            ForceBecomeAwakener(skinName)
+        end
+    })
+end
+
+for _, skinName in ipairs(rightSkins) do
+    AwakenerGroupRight:AddButton({
+        Text = skinName,
+        Func = function()
+            ForceBecomeAwakener(skinName)
+        end
+    })
+end
+
+local AutoGroup = MainTab:AddLeftGroupbox('自动')
+
+AutoGroup:AddButton({
+    Text = '自动拾取钥匙卡一次',
+    Func = function()
+        AutoPickupKeycard()
+    end
+})
+
+AutoGroup:AddButton({
+    Text = '自动刷卡一次',
+    Func = function()
+        AutoSwipeCard()
+    end
+})
+
+local ESPGroup = MainTab:AddRightGroupbox('透视')
+
+ESPGroup:AddToggle('KeycardESP', {
+    Text = '钥匙卡透视',
+    Default = false,
+    Callback = function(value)
+        getgenv().KeycardESP.Enabled = value
+        toggleKeycardESP()
+        if PlayingSound then Sound() end
+    end
+})
+
+ESPGroup:AddToggle('ItemESP', {
+    Text = '物品透视',
+    Default = false,
+    Callback = function(value)
+        getgenv().ItemESP.Enabled = value
+        if value then
+            createItemESP()
+        else
+            destroyItemESP()
+        end
+        if PlayingSound then Sound() end
+    end
+})
+
+ESPGroup:AddToggle('DoorESP', {
+    Text = '门透视',
+    Default = false,
+    Callback = function(value)
+        getgenv().DoorESP.Enabled = value
+        if value then
+            updateDoorESP()
+        else
+            destroyDoorESP()
+        end
+        if PlayingSound then Sound() end
+    end
+})
+
+ESPGroup:AddToggle('NPCEP', {
+    Text = '怪物透视',
+    Default = false,
+    Callback = function(value)
+        getgenv().NPCEP.Enabled = value
+        toggleNPCEP()
+        if PlayingSound then Sound() end
+    end
+})
+
+local CombatGroup = MainTab:AddRightGroupbox('战斗')
+
+local weaponNames = {}
+for _, weapon in ipairs(AvailableWeapons) do
+    table.insert(weaponNames, weapon.Name)
+end
+
+CombatGroup:AddDropdown('WeaponSelect', {
+    Text = '选择武器',
+    Values = weaponNames,
+    Default = 1,
+    Callback = function(value)
+        local weaponValue = GetWeaponValue(value)
+        getgenv().KillAura.SelectedWeapon = weaponValue
+        if getgenv().KillAura.Enabled then
+            StopKillAura()
+            task.wait(0.2)
+            StartKillAura()
+        end
+        if PlayingSound then Sound() end
+    end
+})
+
+CombatGroup:AddDivider()
+
+CombatGroup:AddToggle('EnemyLock', {
+    Text = '怪物锁定',
+    Default = false,
+    Callback = function(value)
+        getgenv().EnemyLock.Enabled = value
+        ToggleEnemyLock()
+        if PlayingSound then Sound() end
+    end
+})
+
+CombatGroup:AddDivider()
+
+CombatGroup:AddToggle('KillAura', {
+    Text = '杀戮光环',
+    Default = false,
+    Callback = function(value)
+        getgenv().KillAura.Enabled = value
+        toggleKillAura()
+        if PlayingSound then Sound() end
+    end
+})
+
+local DetectionGroup = MainTab:AddLeftGroupbox('样本检测')
+
+sampleCountLabel = DetectionGroup:AddLabel('样本数量: 0', true)
+
+DetectionGroup:AddToggle('SampleDetection', {
+    Text = '样本检测',
+    Default = false,
+    Callback = function(value)
+        getgenv().SampleDetection.Enabled = value
+        ToggleSampleDetection()
+        if PlayingSound then Sound() end
+    end
+})
+
+DetectionGroup:AddButton({
+    Text = '强制扫描样本',
+    Func = function()
+        ForceScan()
+    end
+})
+
+local MiscGroup = MainTab:AddRightGroupbox('其他')
+
+MiscGroup:AddToggle('LiquidDelete', {
+    Text = '液体清除',
+    Default = false,
+    Callback = function(value)
+        getgenv().LiquidDelete.Enabled = value
+        if value then
+            startLiquidDelete()
+        else
+            stopLiquidDelete()
+        end
+        if PlayingSound then Sound() end
+    end
+})
+
+MiscGroup:AddDivider()
+
+MiscGroup:AddButton({
+    Text = '立即清除液体',
+    Func = function()
+        local map = workspace:FindFirstChild("Map")
+        if not map then 
+            Library:Notify('未找到目标', 2)
+            return
+        end
+        local count = 0
+        for _, child in ipairs(map:GetChildren()) do
+            local hazard = child:FindFirstChild("Hazard")
+            if hazard then
+                for _, obj in ipairs(hazard:GetChildren()) do
+                    pcall(function() 
+                        obj:Destroy() 
+                        count = count + 1
+                    end)
+                end
+            end
+        end
+        Library:Notify('已清除 ' .. count .. ' 个液体', 2)
+        if PlayingSound then Sound() end
+    end
+})
+
+MiscGroup:AddDivider()
+
+MiscGroup:AddToggle('DoorNoCollide', {
+    Text = '门无碰撞',
+    Default = false,
+    Callback = function(value)
+        getgenv().DoorNoCollide.Enabled = value
+        toggleDoorNoCollide()
+        if PlayingSound then Sound() end
+    end
+})
+
+MiscGroup:AddDivider()
+
+MiscGroup:AddToggle('SmoothBlockDelete', {
+    Text = '铁丝网删除',
+    Default = false,
+    Callback = function(value)
+        getgenv().SmoothBlockDelete.Enabled = value
+        toggleSmoothBlockDelete()
+        if PlayingSound then Sound() end
+    end
+})
+
+MiscGroup:AddDivider()
+
+MiscGroup:AddToggle('InteractionNoCollide', {
+    Text = '房间门无碰撞',
+    Default = false,
+    Callback = function(value)
+        getgenv().InteractionNoCollide.Enabled = value
+        toggleInteractionNoCollide()
+        if PlayingSound then Sound() end
+    end
+})
+
+local ToolGroup = MainTab:AddLeftGroupbox('UI设置')
+
+ToolGroup:AddButton({
+    Text = "卸载",
+    Func = function()
+        getgenv().KeycardESP.Enabled = false
+        toggleKeycardESP()
+        getgenv().ItemESP.Enabled = false
+        destroyItemESP()
+        getgenv().DoorESP.Enabled = false
+        destroyDoorESP()
+        getgenv().NPCEP.Enabled = false
+        toggleNPCEP()
+        
+        getgenv().EnemyLock.Enabled = false
+        ToggleEnemyLock()
+        getgenv().KillAura.Enabled = false
+        toggleKillAura()
+        
+        getgenv().SampleDetection.Enabled = false
+        ToggleSampleDetection()
+        
+        getgenv().LiquidDelete.Enabled = false
+        stopLiquidDelete()
+        getgenv().DoorNoCollide.Enabled = false
+        toggleDoorNoCollide()
+        getgenv().SmoothBlockDelete.Enabled = false
+        toggleSmoothBlockDelete()
+        getgenv().InteractionNoCollide.Enabled = false
+        toggleInteractionNoCollide()
+        
+        Library:Notify('已关闭所有功能，正在卸载...', 2)
+        task.wait(1)
+        Library:Unload()
+    end
+})
+
+ToolGroup:AddToggle('PlaySound', {
+    Text = '提示音',
+    Default = true,
+    Callback = function(value)
+        PlayingSound = value
+        if value then
+            Sound()
+        end
+    end
+})
+
+local UIGroup = UISettingsTab:AddLeftGroupbox('界面设置')
+
+UIGroup:AddLabel('配置管理', true)
+UIGroup:AddLabel('主题管理', false)
+UIGroup:AddLabel('快捷键: RightShift', false)
+
+local folder_path = "兽化逃亡脚本"
+local file_path = "Settings"
+
+ThemeManager:SetLibrary(Library)
+SaveManager:SetLibrary(Library)
+SaveManager:IgnoreThemeSettings()
+SaveManager:SetIgnoreIndexes({ 'MenuKeybind' })
+
+ThemeManager:SetFolder(folder_path)
+SaveManager:SetFolder(folder_path .. '/' .. file_path)
+
+Library.ToggleKeybind = Enum.KeyCode.RightShift
+
+SaveManager:BuildConfigSection(UISettingsTab)
+ThemeManager:ApplyToTab(UISettingsTab)
+
+pcall(function()
+    SaveManager:LoadAutoloadConfig()
+end)
+
+runService.RenderStepped:Connect(function()
+    if getgenv().ItemESP.Enabled then
+        createItemESP()
+    end
+    if getgenv().DoorESP.Enabled then
+        updateDoorESP()
+    end
+end)
+
+if getgenv().DoorNoCollide.Enabled then
+    task.wait(1)
+    startDoorNoCollide()
+end
+
+if getgenv().SmoothBlockDelete.Enabled then
+    task.wait(1)
+    startSmoothBlockDelete()
+end
+
+if getgenv().InteractionNoCollide.Enabled then
+    task.wait(1)
+    startInteractionNoCollide()
+end
+
+if getgenv().KeycardESP.Enabled then
+    task.wait(1)
+    StartKeycardESP()
+end
+
+if getgenv().EnemyLock.Enabled then
+    task.wait(1)
+    StartEnemyLock()
+end
+
+if getgenv().NPCEP.Enabled then
+    task.wait(1)
+    StartNPCEP()
+end
+
+if getgenv().KillAura.Enabled then
+    task.wait(1)
+    StartKillAura()
+end
+
+if getgenv().SampleDetection.Enabled then
+    task.wait(1)
+    StartSampleDetection()
+end
+
+task.wait(0.5)
+Sound()
+
+Library:Notify('兽化逃亡脚本 作者:空白 已加载', 3)
+Library:Notify('按 RightShift 打开菜单', 3)
+Library:Notify('觉醒者变身功能已集成！', 3)
