@@ -1,0 +1,681 @@
+local repo = 'https://raw.githubusercontent.com/mstudio45/Obsidian/main/'
+local Library = loadstring(game:HttpGet(repo .. 'Library.lua'))()
+local ThemeManager = loadstring(game:HttpGet(repo .. 'addons/ThemeManager.lua'))()
+local SaveManager = loadstring(game:HttpGet(repo .. 'addons/SaveManager.lua'))()
+
+local Options = Library.Options
+local Toggles = Library.Toggles
+
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local Workspace = game:GetService("Workspace")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local LocalPlayer = Players.LocalPlayer
+local diedRemote = ReplicatedStorage.Remote.DiedRemote
+
+getgenv().AutoRespawn = false
+getgenv().AntiShark = false
+getgenv().AntiZapDoor = false
+getgenv().AntiTaser = false
+getgenv().AntiYellowBarrel = false
+getgenv().AutoEscape = false
+getgenv().MeleeRange = false
+
+deathCFrame = nil
+deathCameraCFrame = nil
+
+local zapLoopConn = nil
+local respawnRunning = false
+local respawnThread = nil
+local escapeConn = nil
+local escapeCharConn = nil
+local taserLoop = nil
+local meleeActive = false
+local originalHitboxNew = nil
+local originalDetection = nil
+local meleeBarrier = nil
+
+local TouchEvent = ReplicatedStorage.Remote.TouchEvent
+local originalNamecall = nil
+local hookActive = false
+
+local function updateHook()
+    local mt = debug.getmetatable(TouchEvent)
+    if not mt then return end
+    
+    local shouldHook = getgenv().AntiShark or getgenv().AntiYellowBarrel
+    
+    if shouldHook and not hookActive then
+        setreadonly(mt, false)
+        originalNamecall = mt.__namecall
+        mt.__namecall = newcclosure(function(self, ...)
+            local method = getnamecallmethod()
+            if method == "FireServer" then
+                local args = {...}
+                
+                if getgenv().AntiShark then
+                    for i, arg in ipairs(args) do
+                        if typeof(arg) == "Instance" and arg.Parent then
+                            local parentName = tostring(arg.Parent):lower()
+                            if parentName:find("shark") then
+                                return nil
+                            end
+                        end
+                        if typeof(arg) == "Instance" and arg.Name and arg.Name:lower():find("shark") then
+                            return nil
+                        end
+                    end
+                end
+                
+                if getgenv().AntiYellowBarrel then
+                    local selfName = tostring(self):lower()
+                    local shouldBlock = false
+                    
+                    for i, arg in ipairs(args) do
+                        if typeof(arg) == "Instance" and arg.Name then
+                            local argName = arg.Name:lower()
+                            if argName:find("barrel") or argName:find("yellow") or argName == "mainpart" then
+                                shouldBlock = true
+                                break
+                            end
+                        end
+                        if typeof(arg) == "Instance" and arg.Parent and arg.Parent.Name then
+                            local parentName = arg.Parent.Name:lower()
+                            if parentName:find("barrel") or parentName:find("yellow") then
+                                shouldBlock = true
+                                break
+                            end
+                        end
+                    end
+                    
+                    if selfName:find("barrel") or selfName:find("yellow") then
+                        shouldBlock = true
+                    end
+                    
+                    if shouldBlock then
+                        return nil
+                    end
+                end
+            end
+            return originalNamecall(self, ...)
+        end)
+        setreadonly(mt, true)
+        hookActive = true
+    elseif not shouldHook and hookActive then
+        setreadonly(mt, false)
+        mt.__namecall = originalNamecall
+        setreadonly(mt, true)
+        hookActive = false
+    end
+end
+
+local function applyZapOnCharacter(char)
+    if not getgenv().AntiZapDoor then return end
+    if char then
+        char:SetAttribute("SafezoneImmunity", true)
+        char:SetAttribute("SpawnKill", true)
+    end
+    pcall(function()
+        local events = workspace:FindFirstChild("Events")
+        if events then
+            local barrier = events:FindFirstChild("BarrierEnabled")
+            if barrier then
+                barrier.Value = false
+            end
+        end
+    end)
+end
+
+local function enableMeleeRange()
+    if meleeActive then return end
+    
+    if not meleeBarrier then
+        meleeBarrier = Instance.new("Part")
+        meleeBarrier.Shape = Enum.PartType.Ball
+        meleeBarrier.Size = Vector3.new(20, 20, 20)
+        meleeBarrier.Anchored = true
+        meleeBarrier.CanCollide = false
+        meleeBarrier.CanQuery = false
+        meleeBarrier.Transparency = 0.5
+        meleeBarrier.Color = Color3.new(0, 1, 1)
+        meleeBarrier.Material = Enum.Material.ForceField
+        meleeBarrier.Parent = workspace
+    end
+    
+    meleeBarrier.Transparency = 0.5
+    
+    local success, err = pcall(function()
+        local defaultDetection = require(ReplicatedStorage.Module.Weapon.DefaultDetection)
+        originalDetection = debug.getupvalue(defaultDetection, 1)
+        debug.setupvalue(defaultDetection, 1, function() return {} end)
+        
+        local hitboxModule = debug.getupvalue(defaultDetection, 2)
+        originalHitboxNew = hitboxModule.new
+        hitboxModule.new = function(...)
+            local hitbox = originalHitboxNew(...)
+            hitbox.DetectionMode = 3
+            local oldConnect = hitbox.OnHit.Connect
+            hitbox.OnHit.Connect = function(self, callback)
+                return oldConnect(self, function(hitPart)
+                    callback(hitPart)
+                    if not hitPart then return end
+                    local myChar = LocalPlayer.Character
+                    if not myChar then return end
+                    local myRoot = myChar:FindFirstChild("HumanoidRootPart")
+                    if not myRoot then return end
+                    local myTeam = LocalPlayer.Team
+                    local attacked = {[hitPart.Parent] = true}
+                    for _, target in ipairs(Players:GetPlayers()) do
+                        if target ~= LocalPlayer and target.Character and not attacked[target.Character] then
+                            if myTeam and target.Team == myTeam then continue end
+                            if not myTeam and not target.Team then continue end
+                            local targetRoot = target.Character:FindFirstChild("HumanoidRootPart")
+                            if targetRoot and (myRoot.Position - targetRoot.Position).Magnitude <= 20 then
+                                local targetHead = target.Character:FindFirstChild("Head")
+                                if targetHead then
+                                    attacked[target.Character] = true
+                                    callback(targetHead)
+                                end
+                            end
+                        end
+                    end
+                end)
+            end
+            return hitbox
+        end
+    end)
+    
+    if success then
+        meleeActive = true
+    end
+end
+
+local function disableMeleeRange()
+    if not meleeActive then return end
+    
+    if meleeBarrier then
+        meleeBarrier.Transparency = 1
+    end
+    
+    pcall(function()
+        local defaultDetection = require(ReplicatedStorage.Module.Weapon.DefaultDetection)
+        if originalDetection then
+            debug.setupvalue(defaultDetection, 1, originalDetection)
+        end
+        
+        local hitboxModule = debug.getupvalue(defaultDetection, 2)
+        if hitboxModule and originalHitboxNew then
+            hitboxModule.new = originalHitboxNew
+        end
+    end)
+    
+    meleeActive = false
+end
+
+LocalPlayer.CharacterAdded:Connect(function(char)
+    task.wait(0.1)
+    applyZapOnCharacter(char)
+end)
+
+local Window = Library:CreateWindow({
+    Title = '开州乐园脚本 | 空白开发',
+    Center = true,
+    AutoShow = true
+})
+
+local MainTab = Window:AddTab('主要')
+local UISettingsTab = Window:AddTab('UI设置')
+
+local FunctionsGroup = MainTab:AddLeftGroupbox('核心功能')
+
+local function stopRespawn()
+    respawnRunning = false
+    if respawnThread then
+        coroutine.close(respawnThread)
+        respawnThread = nil
+    end
+end
+
+local function setCameraCFrameSafely(targetCF)
+    local maxAttempts = 10
+    local attempt = 0
+    while attempt < maxAttempts do
+        task.wait(0.05)
+        local cam = workspace.CurrentCamera
+        if cam and cam.Parent then
+            cam.CFrame = targetCF
+            if (cam.CFrame.Position - targetCF.Position).Magnitude < 0.5 then
+                break
+            end
+        end
+        attempt = attempt + 1
+    end
+end
+
+local function startRespawn()
+    if respawnThread then
+        coroutine.close(respawnThread)
+        respawnThread = nil
+    end
+    respawnRunning = true
+    respawnThread = coroutine.create(function()
+        while respawnRunning do
+            if not getgenv().AutoRespawn then
+                task.wait(0.1)
+                continue
+            end
+
+            local char = LocalPlayer.Character
+            local humanoid = char and char:FindFirstChildOfClass("Humanoid")
+            local humanoidRootPart = char and char:FindFirstChild("HumanoidRootPart")
+            local camera = workspace.CurrentCamera
+
+            if humanoid and humanoid.Health > 0 and humanoidRootPart then
+                deathCFrame = humanoidRootPart.CFrame
+                if camera then
+                    deathCameraCFrame = camera.CFrame
+                end
+            end
+
+            local needRespawn = false
+            if humanoid and humanoid.Health <= 0 then
+                needRespawn = true
+            end
+            if LocalPlayer.Team and LocalPlayer.Team.Name == "Raytraxian" then
+                needRespawn = true
+            end
+
+            if needRespawn then
+                pcall(function()
+                    diedRemote:FireServer()
+                end)
+                task.wait(0.38)
+
+                local newChar = LocalPlayer.Character
+                if newChar and deathCFrame then
+                    local rootPart = newChar:FindFirstChild("HumanoidRootPart")
+                    if rootPart then
+                        rootPart.CFrame = deathCFrame
+                    end
+                    
+                    if deathCameraCFrame then
+                        setCameraCFrameSafely(deathCameraCFrame)
+                    end
+                end
+            end
+            task.wait(0.1)
+        end
+    end)
+    coroutine.resume(respawnThread)
+end
+
+local function enableZap()
+    if zapLoopConn then return end
+    
+    applyZapOnCharacter(LocalPlayer.Character)
+    
+    zapLoopConn = RunService.Heartbeat:Connect(function()
+        if not getgenv().AntiZapDoor then 
+            if zapLoopConn then
+                zapLoopConn:Disconnect()
+                zapLoopConn = nil
+            end
+            return 
+        end
+        local c = LocalPlayer.Character
+        if c then
+            c:SetAttribute("SafezoneImmunity", true)
+            c:SetAttribute("SpawnKill", true)
+        end
+        pcall(function()
+            local events = workspace:FindFirstChild("Events")
+            if events then
+                local barrier = events:FindFirstChild("BarrierEnabled")
+                if barrier and barrier.Value ~= false then
+                    barrier.Value = false
+                end
+            end
+        end)
+    end)
+end
+
+local function disableZap()
+    if zapLoopConn then
+        zapLoopConn:Disconnect()
+        zapLoopConn = nil
+    end
+    
+    local char = LocalPlayer.Character
+    if char then
+        char:SetAttribute("SafezoneImmunity", nil)
+        char:SetAttribute("SpawnKill", nil)
+    end
+    
+    pcall(function()
+        local events = workspace:FindFirstChild("Events")
+        if events then
+            local barrier = events:FindFirstChild("BarrierEnabled")
+            if barrier then
+                barrier.Value = true
+            end
+        end
+    end)
+end
+
+local function manualRespawn()
+    local currentPos = nil
+    local currentCam = nil
+    local char = LocalPlayer.Character
+    if char then
+        local root = char:FindFirstChild("HumanoidRootPart")
+        if root then
+            currentPos = root.CFrame
+        end
+        local cam = workspace.CurrentCamera
+        if cam then
+            currentCam = cam.CFrame
+        end
+    end
+    
+    pcall(function()
+        diedRemote:FireServer()
+    end)
+    
+    task.wait(0.38)
+    
+    local newChar = LocalPlayer.Character
+    if newChar and currentPos then
+        local newRoot = newChar:FindFirstChild("HumanoidRootPart")
+        if newRoot then
+            newRoot.CFrame = currentPos
+        end
+        if currentCam then
+            setCameraCFrameSafely(currentCam)
+        end
+    end
+    
+    Library:Notify('已触发', 1)
+end
+
+local function enableTaser()
+    if taserLoop then return end
+    
+    taserLoop = RunService.Heartbeat:Connect(function()
+        if not getgenv().AntiTaser then
+            if taserLoop then
+                taserLoop:Disconnect()
+                taserLoop = nil
+            end
+            return
+        end
+        
+        local char = LocalPlayer.Character
+        if char then
+            local humanoid = char:FindFirstChildOfClass("Humanoid")
+            if humanoid then
+                if humanoid:GetAttribute("Stunned") == true then
+                    humanoid:SetAttribute("Stunned", false)
+                end
+                if humanoid:GetAttribute("Tased") == true then
+                    humanoid:SetAttribute("Tased", false)
+                end
+                if humanoid:GetAttribute("Electrocuted") == true then
+                    humanoid:SetAttribute("Electrocuted", false)
+                end
+            end
+            
+            local stunnedPart = char:FindFirstChild("Stunned")
+            if stunnedPart then
+                stunnedPart:Destroy()
+            end
+            
+            local tasedPart = char:FindFirstChild("Tased")
+            if tasedPart then
+                tasedPart:Destroy()
+            end
+        end
+    end)
+end
+
+local function disableTaser()
+    if taserLoop then
+        taserLoop:Disconnect()
+        taserLoop = nil
+    end
+end
+
+local function checkAndEscape()
+    if not getgenv().AutoEscape then return end
+    
+    local char = workspace:FindFirstChild(LocalPlayer.Name)
+    if char and char:FindFirstChild("GrabWeld") then
+        task.spawn(function()
+            while char and char:FindFirstChild("GrabWeld") and getgenv().AutoEscape do
+                pcall(function()
+                    local escapeRemote = ReplicatedStorage:FindFirstChild("Remote")
+                    if escapeRemote then
+                        escapeRemote = escapeRemote:FindFirstChild("Grab")
+                        if escapeRemote then
+                            escapeRemote = escapeRemote:FindFirstChild("Escape")
+                            if escapeRemote then
+                                escapeRemote:FireServer()
+                            end
+                        end
+                    end
+                end)
+                task.wait()
+            end
+        end)
+    end
+end
+
+local function setupEscapeListener()
+    if escapeConn then
+        escapeConn:Disconnect()
+    end
+    if escapeCharConn then
+        escapeCharConn:Disconnect()
+    end
+    
+    escapeConn = workspace.ChildAdded:Connect(function(child)
+        if child.Name == LocalPlayer.Name then
+            task.wait(0.1)
+            checkAndEscape()
+            if escapeCharConn then
+                escapeCharConn:Disconnect()
+            end
+            escapeCharConn = child.ChildAdded:Connect(function(c)
+                if c.Name == "GrabWeld" then
+                    checkAndEscape()
+                end
+            end)
+        end
+    end)
+    
+    local char = workspace:FindFirstChild(LocalPlayer.Name)
+    if char then
+        task.wait(0.1)
+        checkAndEscape()
+        if escapeCharConn then
+            escapeCharConn:Disconnect()
+        end
+        escapeCharConn = char.ChildAdded:Connect(function(c)
+            if c.Name == "GrabWeld" then
+                checkAndEscape()
+            end
+        end)
+    end
+end
+
+local function disableEscape()
+    if escapeConn then
+        escapeConn:Disconnect()
+        escapeConn = nil
+    end
+    if escapeCharConn then
+        escapeCharConn:Disconnect()
+        escapeCharConn = nil
+    end
+end
+
+FunctionsGroup:AddToggle('AutoRespawnToggle', {
+    Text = '秒复活 + 传送回原地 + 防感染',
+    Default = false,
+    Callback = function(value)
+        getgenv().AutoRespawn = value
+        if value then
+            startRespawn()
+        else
+            stopRespawn()
+        end
+    end
+})
+
+FunctionsGroup:AddToggle('MeleeRangeToggle', {
+    Text = '近战范围增强',
+    Default = false,
+    Callback = function(value)
+        getgenv().MeleeRange = value
+        if value then
+            enableMeleeRange()
+        else
+            disableMeleeRange()
+        end
+    end
+})
+
+FunctionsGroup:AddToggle('AntiSharkToggle', {
+    Text = '防鲨鱼',
+    Default = false,
+    Callback = function(value)
+        getgenv().AntiShark = value
+        updateHook()
+    end
+})
+
+FunctionsGroup:AddToggle('AntiZapToggle', {
+    Text = '防电门',
+    Default = false,
+    Callback = function(value)
+        getgenv().AntiZapDoor = value
+        if value then
+            enableZap()
+        else
+            disableZap()
+        end
+    end
+})
+
+FunctionsGroup:AddToggle('AntiTaserToggle', {
+    Text = '防电击枪触电',
+    Default = false,
+    Callback = function(value)
+        getgenv().AntiTaser = value
+        if value then
+            enableTaser()
+        else
+            disableTaser()
+        end
+    end
+})
+
+FunctionsGroup:AddToggle('AntiYellowBarrelToggle', {
+    Text = '防黄色桶',
+    Default = false,
+    Callback = function(value)
+        getgenv().AntiYellowBarrel = value
+        updateHook()
+    end
+})
+
+FunctionsGroup:AddToggle('AutoEscapeToggle', {
+    Text = '自动挣脱抓取',
+    Default = false,
+    Callback = function(value)
+        getgenv().AutoEscape = value
+        if value then
+            setupEscapeListener()
+        else
+            disableEscape()
+        end
+    end
+})
+
+FunctionsGroup:AddButton({
+    Text = '手动重生',
+    Func = function()
+        manualRespawn()
+    end
+})
+
+local UIGroupSettings = UISettingsTab:AddLeftGroupbox('界面设置')
+UIGroupSettings:AddLabel('菜单快捷键'):AddKeyPicker("MenuKeybind", {
+    Default = "RightShift",
+    NoUI = false,
+    Text = '菜单快捷键'
+})
+UIGroupSettings:AddDivider()
+UIGroupSettings:AddLabel('配置管理', true)
+
+UIGroupSettings:AddButton({
+    Text = '卸载脚本',
+    Func = function()
+        getgenv().AutoRespawn = false
+        getgenv().AntiShark = false
+        getgenv().AntiZapDoor = false
+        getgenv().AntiTaser = false
+        getgenv().AntiYellowBarrel = false
+        getgenv().AutoEscape = false
+        getgenv().MeleeRange = false
+        
+        stopRespawn()
+        disableZap()
+        disableMeleeRange()
+        disableTaser()
+        disableEscape()
+        
+        if meleeBarrier then
+            meleeBarrier:Destroy()
+            meleeBarrier = nil
+        end
+        
+        local mt = debug.getmetatable(TouchEvent)
+        if mt and originalNamecall then
+            setreadonly(mt, false)
+            mt.__namecall = originalNamecall
+            setreadonly(mt, true)
+        end
+        hookActive = false
+        
+        task.wait(0.5)
+        Library:Unload()
+    end
+})
+
+Library.ToggleKeybind = Options.MenuKeybind
+
+local folder_path = "开州乐园"
+ThemeManager:SetLibrary(Library)
+SaveManager:SetLibrary(Library)
+SaveManager:IgnoreThemeSettings()
+SaveManager:SetIgnoreIndexes({ 'MenuKeybind' })
+ThemeManager:SetFolder(folder_path)
+SaveManager:SetFolder(folder_path .. '/Settings')
+SaveManager:BuildConfigSection(UISettingsTab)
+ThemeManager:ApplyToTab(UISettingsTab)
+
+pcall(function()
+    SaveManager:LoadAutoloadConfig()
+end)
+
+RunService.RenderStepped:Connect(function()
+    if not getgenv().MeleeRange then return end
+    local myChar = LocalPlayer.Character
+    if myChar and meleeBarrier then
+        local myRoot = myChar:FindFirstChild("HumanoidRootPart")
+        if myRoot then
+            meleeBarrier.CFrame = myRoot.CFrame
+        end
+    end
+end)
