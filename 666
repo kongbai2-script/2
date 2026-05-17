@@ -10,6 +10,7 @@ local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local Workspace = game:GetService("Workspace")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local SoundService = game:GetService("SoundService")
 
 local LocalPlayer = Players.LocalPlayer
 local diedRemote = ReplicatedStorage.Remote.DiedRemote
@@ -17,206 +18,44 @@ local diedRemote = ReplicatedStorage.Remote.DiedRemote
 getgenv().AutoRespawn = false
 getgenv().AntiShark = false
 getgenv().AntiZapDoor = false
-getgenv().AntiTaser = false
-getgenv().AntiYellowBarrel = false
-getgenv().AutoEscape = false
 getgenv().MeleeRange = false
+getgenv().AntiTaser = false
+getgenv().AutoEscape = false
+getgenv().AutoTeleport = false
+getgenv().TeleportMode = "脚底"
+getgenv().TeleportTargets = {}
+
+getgenv().NightvisionNotify = false
+getgenv().NightvisionESP = false
+local nightvisionRunning = false
+local nightvisionThread = nil
+local nightvisionSound = nil
+local nightvisionLastState = false
+local nightvisionBillboard = nil
+local espRunning = false
+local espThread = nil
 
 deathCFrame = nil
 deathCameraCFrame = nil
 
+local sharkHooked = false
 local zapLoopConn = nil
 local respawnRunning = false
 local respawnThread = nil
+local meleeBarrier = nil
+local meleeHookActive = false
+local originalHitboxNew = nil
+local taserHookConn = false
+local taserMetatable = nil
+local taserOriginalNamecall = nil
 local escapeConn = nil
 local escapeCharConn = nil
-local taserLoop = nil
-local meleeActive = false
-local originalHitboxNew = nil
-local originalDetection = nil
-local meleeBarrier = nil
 
-local TouchEvent = ReplicatedStorage.Remote.TouchEvent
-local originalNamecall = nil
-local hookActive = false
+local teleportConnection = nil
+local teleportTarget = nil
 
-local function updateHook()
-    local mt = debug.getmetatable(TouchEvent)
-    if not mt then return end
-    
-    local shouldHook = getgenv().AntiShark or getgenv().AntiYellowBarrel
-    
-    if shouldHook and not hookActive then
-        setreadonly(mt, false)
-        originalNamecall = mt.__namecall
-        mt.__namecall = newcclosure(function(self, ...)
-            local method = getnamecallmethod()
-            if method == "FireServer" then
-                local args = {...}
-                
-                if getgenv().AntiShark then
-                    for i, arg in ipairs(args) do
-                        if typeof(arg) == "Instance" and arg.Parent then
-                            local parentName = tostring(arg.Parent):lower()
-                            if parentName:find("shark") then
-                                return nil
-                            end
-                        end
-                        if typeof(arg) == "Instance" and arg.Name and arg.Name:lower():find("shark") then
-                            return nil
-                        end
-                    end
-                end
-                
-                if getgenv().AntiYellowBarrel then
-                    local selfName = tostring(self):lower()
-                    local shouldBlock = false
-                    
-                    for i, arg in ipairs(args) do
-                        if typeof(arg) == "Instance" and arg.Name then
-                            local argName = arg.Name:lower()
-                            if argName:find("barrel") or argName:find("yellow") or argName == "mainpart" then
-                                shouldBlock = true
-                                break
-                            end
-                        end
-                        if typeof(arg) == "Instance" and arg.Parent and arg.Parent.Name then
-                            local parentName = arg.Parent.Name:lower()
-                            if parentName:find("barrel") or parentName:find("yellow") then
-                                shouldBlock = true
-                                break
-                            end
-                        end
-                    end
-                    
-                    if selfName:find("barrel") or selfName:find("yellow") then
-                        shouldBlock = true
-                    end
-                    
-                    if shouldBlock then
-                        return nil
-                    end
-                end
-            end
-            return originalNamecall(self, ...)
-        end)
-        setreadonly(mt, true)
-        hookActive = true
-    elseif not shouldHook and hookActive then
-        setreadonly(mt, false)
-        mt.__namecall = originalNamecall
-        setreadonly(mt, true)
-        hookActive = false
-    end
-end
-
-local function applyZapOnCharacter(char)
-    if not getgenv().AntiZapDoor then return end
-    if char then
-        char:SetAttribute("SafezoneImmunity", true)
-        char:SetAttribute("SpawnKill", true)
-    end
-    pcall(function()
-        local events = workspace:FindFirstChild("Events")
-        if events then
-            local barrier = events:FindFirstChild("BarrierEnabled")
-            if barrier then
-                barrier.Value = false
-            end
-        end
-    end)
-end
-
-local function enableMeleeRange()
-    if meleeActive then return end
-    
-    if not meleeBarrier then
-        meleeBarrier = Instance.new("Part")
-        meleeBarrier.Shape = Enum.PartType.Ball
-        meleeBarrier.Size = Vector3.new(20, 20, 20)
-        meleeBarrier.Anchored = true
-        meleeBarrier.CanCollide = false
-        meleeBarrier.CanQuery = false
-        meleeBarrier.Transparency = 0.5
-        meleeBarrier.Color = Color3.new(0, 1, 1)
-        meleeBarrier.Material = Enum.Material.ForceField
-        meleeBarrier.Parent = workspace
-    end
-    
-    meleeBarrier.Transparency = 0.5
-    
-    local success, err = pcall(function()
-        local defaultDetection = require(ReplicatedStorage.Module.Weapon.DefaultDetection)
-        originalDetection = debug.getupvalue(defaultDetection, 1)
-        debug.setupvalue(defaultDetection, 1, function() return {} end)
-        
-        local hitboxModule = debug.getupvalue(defaultDetection, 2)
-        originalHitboxNew = hitboxModule.new
-        hitboxModule.new = function(...)
-            local hitbox = originalHitboxNew(...)
-            hitbox.DetectionMode = 3
-            local oldConnect = hitbox.OnHit.Connect
-            hitbox.OnHit.Connect = function(self, callback)
-                return oldConnect(self, function(hitPart)
-                    callback(hitPart)
-                    if not hitPart then return end
-                    local myChar = LocalPlayer.Character
-                    if not myChar then return end
-                    local myRoot = myChar:FindFirstChild("HumanoidRootPart")
-                    if not myRoot then return end
-                    local myTeam = LocalPlayer.Team
-                    local attacked = {[hitPart.Parent] = true}
-                    for _, target in ipairs(Players:GetPlayers()) do
-                        if target ~= LocalPlayer and target.Character and not attacked[target.Character] then
-                            if myTeam and target.Team == myTeam then continue end
-                            if not myTeam and not target.Team then continue end
-                            local targetRoot = target.Character:FindFirstChild("HumanoidRootPart")
-                            if targetRoot and (myRoot.Position - targetRoot.Position).Magnitude <= 20 then
-                                local targetHead = target.Character:FindFirstChild("Head")
-                                if targetHead then
-                                    attacked[target.Character] = true
-                                    callback(targetHead)
-                                end
-                            end
-                        end
-                    end
-                end)
-            end
-            return hitbox
-        end
-    end)
-    
-    if success then
-        meleeActive = true
-    end
-end
-
-local function disableMeleeRange()
-    if not meleeActive then return end
-    
-    if meleeBarrier then
-        meleeBarrier.Transparency = 1
-    end
-    
-    pcall(function()
-        local defaultDetection = require(ReplicatedStorage.Module.Weapon.DefaultDetection)
-        if originalDetection then
-            debug.setupvalue(defaultDetection, 1, originalDetection)
-        end
-        
-        local hitboxModule = debug.getupvalue(defaultDetection, 2)
-        if hitboxModule and originalHitboxNew then
-            hitboxModule.new = originalHitboxNew
-        end
-    end)
-    
-    meleeActive = false
-end
-
-LocalPlayer.CharacterAdded:Connect(function(char)
-    task.wait(0.1)
-    applyZapOnCharacter(char)
-end)
+local meleeLastAttackFrame = 0
+local meleeWeaponCallback = nil
 
 local Window = Library:CreateWindow({
     Title = '开州乐园脚本 | 空白开发',
@@ -228,6 +67,212 @@ local MainTab = Window:AddTab('主要')
 local UISettingsTab = Window:AddTab('UI设置')
 
 local FunctionsGroup = MainTab:AddLeftGroupbox('核心功能')
+local TeleportGroup = MainTab:AddLeftGroupbox('自动传送')
+local NightvisionGroup = MainTab:AddRightGroupbox('夜视仪')
+
+local function setupNightvisionSound()
+    if nightvisionSound then return end
+    nightvisionSound = Instance.new("Sound")
+    nightvisionSound.SoundId = "rbxassetid://4590657391"
+    nightvisionSound.Volume = 1
+    nightvisionSound.Parent = SoundService
+end
+
+local function createNightvisionESP()
+    local terrain = workspace:FindFirstChild("Terrain")
+    if not terrain then return end
+    local nightvision = terrain:FindFirstChild("Nightvision")
+    if not nightvision then return end
+    
+    if nightvisionBillboard and nightvisionBillboard.Parent then
+        nightvisionBillboard:Destroy()
+    end
+    
+    nightvisionBillboard = Instance.new("BillboardGui")
+    nightvisionBillboard.Name = "NightvisionESP"
+    nightvisionBillboard.Adornee = nightvision
+    nightvisionBillboard.Size = UDim2.new(0, 200, 0, 50)
+    nightvisionBillboard.StudsOffset = Vector3.new(0, 2, 0)
+    nightvisionBillboard.AlwaysOnTop = true
+    nightvisionBillboard.Parent = nightvision
+    
+    local textLabel = Instance.new("TextLabel")
+    textLabel.Size = UDim2.new(1, 0, 1, 0)
+    textLabel.BackgroundTransparency = 1
+    textLabel.Text = "夜视仪"
+    textLabel.TextColor3 = Color3.new(1, 1, 0)
+    textLabel.TextScaled = true
+    textLabel.TextStrokeTransparency = 0.5
+    textLabel.TextStrokeColor3 = Color3.new(0, 0, 0)
+    textLabel.Font = Enum.Font.GothamBold
+    textLabel.Parent = nightvisionBillboard
+end
+
+local function removeNightvisionESP()
+    if nightvisionBillboard then
+        nightvisionBillboard:Destroy()
+        nightvisionBillboard = nil
+    end
+end
+
+local function startESP()
+    if espThread then
+        coroutine.close(espThread)
+        espThread = nil
+    end
+    
+    espRunning = true
+    espThread = coroutine.create(function()
+        while espRunning do
+            if not getgenv().NightvisionESP then
+                removeNightvisionESP()
+                task.wait(0.5)
+                continue
+            end
+            
+            local terrain = workspace:FindFirstChild("Terrain")
+            if terrain then
+                local nightvision = terrain:FindFirstChild("Nightvision")
+                if nightvision then
+                    if not nightvisionBillboard or nightvisionBillboard.Parent ~= nightvision then
+                        createNightvisionESP()
+                    end
+                else
+                    removeNightvisionESP()
+                end
+            else
+                removeNightvisionESP()
+            end
+            
+            task.wait(0.5)
+        end
+    end)
+    coroutine.resume(espThread)
+end
+
+local function stopESP()
+    espRunning = false
+    if espThread then
+        coroutine.close(espThread)
+        espThread = nil
+    end
+    removeNightvisionESP()
+end
+
+local function startNightvisionMonitor()
+    if nightvisionThread then
+        coroutine.close(nightvisionThread)
+        nightvisionThread = nil
+    end
+    
+    nightvisionRunning = true
+    setupNightvisionSound()
+    nightvisionLastState = false
+    
+    nightvisionThread = coroutine.create(function()
+        local Terrain = workspace:WaitForChild("Terrain")
+        
+        while nightvisionRunning do
+            if not getgenv().NightvisionNotify then
+                task.wait(1)
+                nightvisionLastState = false
+                continue
+            end
+            
+            local currentState = Terrain:FindFirstChild("Nightvision") ~= nil
+            
+            if currentState and not nightvisionLastState then
+                Library:Notify('夜视仪已刷新！', 3)
+                
+                if nightvisionSound then
+                    nightvisionSound:Stop()
+                    nightvisionSound:Play()
+                end
+            end
+            
+            nightvisionLastState = currentState
+            task.wait(1)
+        end
+    end)
+    coroutine.resume(nightvisionThread)
+end
+
+local function stopNightvisionMonitor()
+    nightvisionRunning = false
+    if nightvisionThread then
+        coroutine.close(nightvisionThread)
+        nightvisionThread = nil
+    end
+    if nightvisionSound then
+        nightvisionSound:Stop()
+    end
+    nightvisionLastState = false
+end
+
+local function AutoGetNightvision()
+    local character = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
+    local humanoidRootPart = character:WaitForChild("HumanoidRootPart")
+    local originalPosition = humanoidRootPart.Position
+
+    local nightvision = Workspace.Terrain:FindFirstChild("Nightvision")
+    if not nightvision then
+        Library:Notify('未找到夜视仪', 2)
+        return
+    end
+
+    local hitbox = nightvision:FindFirstChild("Hitbox")
+    if not hitbox then
+        Library:Notify('未找到夜视仪Hitbox', 2)
+        return
+    end
+
+    humanoidRootPart.CFrame = CFrame.new(hitbox.Position + Vector3.new(0, 3, 0))
+    task.wait(0.3)
+    
+    for _, child in ipairs(hitbox:GetDescendants()) do
+        if child:IsA("ProximityPrompt") then
+            fireproximityprompt(child)
+            Library:Notify('已获取夜视仪', 2)
+            break
+        elseif child:IsA("ClickDetector") then
+            child:Click()
+            Library:Notify('已获取夜视仪', 2)
+            break
+        end
+    end
+    
+    task.wait(0.5)
+    humanoidRootPart.CFrame = CFrame.new(originalPosition)
+end
+
+local function getAllPlayerNames()
+    local names = {}
+    for _, p in ipairs(Players:GetPlayers()) do
+        if p ~= LocalPlayer then
+            table.insert(names, p.Name)
+        end
+    end
+    return names
+end
+
+local function normalizeTargetList(selection)
+    if selection == nil then
+        return {}
+    end
+    local list = {}
+    if type(selection[1]) == "string" then
+        for _, name in ipairs(selection) do
+            table.insert(list, name)
+        end
+    else
+        for name, _ in pairs(selection) do
+            if type(name) == "string" then
+                table.insert(list, name)
+            end
+        end
+    end
+    return list
+end
 
 local function stopRespawn()
     respawnRunning = false
@@ -310,17 +355,47 @@ local function startRespawn()
     coroutine.resume(respawnThread)
 end
 
+local function setupSharkHook()
+    if sharkHooked then return end
+    local remote = ReplicatedStorage.Remote.TouchEvent
+    hookmetamethod(remote, "__namecall", newcclosure(function(self, ...)
+        local method = getnamecallmethod()
+        if method == "FireServer" and getgenv().AntiShark then
+            local args = {...}
+            if args[1] and typeof(args[1]) == "Instance" and tostring(args[1].Parent):find("Shark") then
+                return nil
+            end
+        end
+        local mt = debug.getmetatable(remote)
+        if mt and mt.__namecall then
+            return mt.__namecall(self, ...)
+        end
+        return nil
+    end))
+    sharkHooked = true
+end
+
 local function enableZap()
     if zapLoopConn then return end
     
-    applyZapOnCharacter(LocalPlayer.Character)
+    local char = LocalPlayer.Character
+    if char then
+        char:SetAttribute("SafezoneImmunity", true)
+        char:SetAttribute("SpawnKill", true)
+    end
     
-    zapLoopConn = RunService.Heartbeat:Connect(function()
-        if not getgenv().AntiZapDoor then 
-            if zapLoopConn then
-                zapLoopConn:Disconnect()
-                zapLoopConn = nil
+    pcall(function()
+        local events = workspace:FindFirstChild("Events")
+        if events then
+            local barrier = events:FindFirstChild("BarrierEnabled")
+            if barrier then
+                barrier.Value = false
             end
+        end
+    end)
+    
+    zapLoopConn = RunService.RenderStepped:Connect(function()
+        if not getgenv().AntiZapDoor then 
             return 
         end
         local c = LocalPlayer.Character
@@ -363,6 +438,70 @@ local function disableZap()
     end)
 end
 
+local function enableMeleeRange()
+    if meleeHookActive then return end
+    
+    if not meleeBarrier then
+        meleeBarrier = Instance.new("Part")
+        meleeBarrier.Shape = Enum.PartType.Ball
+        meleeBarrier.Size = Vector3.new(20, 20, 20)
+        meleeBarrier.Anchored = true
+        meleeBarrier.CanCollide = false
+        meleeBarrier.CanQuery = false
+        meleeBarrier.Transparency = 0.85
+        meleeBarrier.Color = Color3.new(0.3, 0.8, 1)
+        meleeBarrier.Material = Enum.Material.ForceField
+        meleeBarrier.Parent = workspace
+    end
+    
+    meleeBarrier.Transparency = 0.85
+    
+    local success, err = pcall(function()
+        local defaultDetection = require(ReplicatedStorage.Module.Weapon.DefaultDetection)
+        debug.setupvalue(defaultDetection, 1, function() return {} end)
+        
+        local hitboxModule = debug.getupvalue(defaultDetection, 2)
+        originalHitboxNew = hitboxModule.new
+        hitboxModule.new = function(...)
+            local hitbox = originalHitboxNew(...)
+            hitbox.DetectionMode = 3
+            local oldConnect = hitbox.OnHit.Connect
+            hitbox.OnHit.Connect = function(self, callback)
+                meleeWeaponCallback = callback
+                return oldConnect(self, function(hitPart)
+                    meleeLastAttackFrame = 0
+                    callback(hitPart)
+                end)
+            end
+            return hitbox
+        end
+    end)
+    
+    if success then
+        meleeHookActive = true
+    end
+end
+
+local function disableMeleeRange()
+    if not meleeHookActive then return end
+    
+    if meleeBarrier then
+        meleeBarrier.Transparency = 1
+    end
+    
+    pcall(function()
+        local defaultDetection = require(ReplicatedStorage.Module.Weapon.DefaultDetection)
+        local hitboxModule = debug.getupvalue(defaultDetection, 2)
+        if hitboxModule and originalHitboxNew then
+            hitboxModule.new = originalHitboxNew
+        end
+    end)
+    
+    meleeHookActive = false
+    meleeWeaponCallback = nil
+    meleeLastAttackFrame = 0
+end
+
 local function manualRespawn()
     local currentPos = nil
     local currentCam = nil
@@ -399,50 +538,50 @@ local function manualRespawn()
 end
 
 local function enableTaser()
-    if taserLoop then return end
+    if taserHookConn then return end
     
-    taserLoop = RunService.Heartbeat:Connect(function()
-        if not getgenv().AntiTaser then
-            if taserLoop then
-                taserLoop:Disconnect()
-                taserLoop = nil
-            end
-            return
-        end
-        
-        local char = LocalPlayer.Character
-        if char then
-            local humanoid = char:FindFirstChildOfClass("Humanoid")
-            if humanoid then
-                if humanoid:GetAttribute("Stunned") == true then
-                    humanoid:SetAttribute("Stunned", false)
+    local rayTrax = ReplicatedStorage:FindFirstChild("Remote")
+    if rayTrax then
+        rayTrax = rayTrax:FindFirstChild("Raytrax")
+    end
+    
+    if rayTrax then
+        local taser = rayTrax:FindFirstChild("Taser")
+        if taser then
+            local mt = getrawmetatable(taser)
+            if mt then
+                taserMetatable = mt
+                taserOriginalNamecall = mt.__namecall
+                setreadonly(mt, false)
+                mt.__namecall = function(self, ...)
+                    local method = getnamecallmethod()
+                    if getgenv().AntiTaser and self == taser and method == "FireServer" then
+                        return nil
+                    end
+                    if taserOriginalNamecall then
+                        return taserOriginalNamecall(self, ...)
+                    end
+                    return nil
                 end
-                if humanoid:GetAttribute("Tased") == true then
-                    humanoid:SetAttribute("Tased", false)
-                end
-                if humanoid:GetAttribute("Electrocuted") == true then
-                    humanoid:SetAttribute("Electrocuted", false)
-                end
-            end
-            
-            local stunnedPart = char:FindFirstChild("Stunned")
-            if stunnedPart then
-                stunnedPart:Destroy()
-            end
-            
-            local tasedPart = char:FindFirstChild("Tased")
-            if tasedPart then
-                tasedPart:Destroy()
+                setreadonly(mt, true)
+                taserHookConn = true
             end
         end
-    end)
+    end
 end
 
 local function disableTaser()
-    if taserLoop then
-        taserLoop:Disconnect()
-        taserLoop = nil
+    if not taserHookConn then return end
+    
+    if taserMetatable and taserOriginalNamecall then
+        setreadonly(taserMetatable, false)
+        taserMetatable.__namecall = taserOriginalNamecall
+        setreadonly(taserMetatable, true)
     end
+    
+    taserHookConn = false
+    taserMetatable = nil
+    taserOriginalNamecall = nil
 end
 
 local function checkAndEscape()
@@ -519,6 +658,146 @@ local function disableEscape()
     end
 end
 
+local function getTeleportPosition(targetChar, mode)
+    local root = targetChar:FindFirstChild("HumanoidRootPart")
+    if not root then return nil end
+    local targetPos = root.Position
+    local targetCF = root.CFrame
+    
+    if mode == "脚底" then
+        return targetPos - Vector3.new(0, 5, 0)
+    elseif mode == "背后" then
+        local backPos = targetCF.Position - targetCF.LookVector * 3
+        return backPos
+    end
+    return targetPos - Vector3.new(0, 5, 0)
+end
+
+local function isTeleportTargetValid(target)
+    if not target then return false end
+    local char = target.Character
+    if not char then return false end
+    local humanoid = char:FindFirstChildOfClass("Humanoid")
+    if not humanoid or humanoid.Health <= 0 then return false end
+    if LocalPlayer.Team and target.Team == LocalPlayer.Team then return false end
+    local root = char:FindFirstChild("HumanoidRootPart")
+    if not root then return false end
+    return true
+end
+
+local function getTeleportTarget()
+    if getgenv().TeleportTargets and #getgenv().TeleportTargets > 0 then
+        for _, name in ipairs(getgenv().TeleportTargets) do
+            local p = Players:FindFirstChild(name)
+            if p and p ~= LocalPlayer then
+                if isTeleportTargetValid(p) then
+                    return p
+                end
+            end
+        end
+        return nil
+    else
+        local enemies = {}
+        for _, player in ipairs(Players:GetPlayers()) do
+            if player == LocalPlayer then continue end
+            if LocalPlayer.Team and player.Team == LocalPlayer.Team then continue end
+            local char = player.Character
+            if not char then continue end
+            local humanoid = char:FindFirstChildOfClass("Humanoid")
+            if not humanoid or humanoid.Health <= 0 then continue end
+            table.insert(enemies, player)
+        end
+        if #enemies == 0 then return nil end
+        return enemies[math.random(1, #enemies)]
+    end
+end
+
+local function enableTeleport()
+    if teleportConnection then return end
+    teleportTarget = getTeleportTarget()
+    teleportConnection = RunService.RenderStepped:Connect(function()
+        if not getgenv().AutoTeleport then return end
+        if not isTeleportTargetValid(teleportTarget) then
+            teleportTarget = getTeleportTarget()
+        end
+        if not teleportTarget then return end
+        local myChar = LocalPlayer.Character
+        if not myChar then return end
+        local myRoot = myChar:FindFirstChild("HumanoidRootPart")
+        if not myRoot then return end
+        local targetChar = teleportTarget.Character
+        if not targetChar then return end
+        local teleportPos = getTeleportPosition(targetChar, getgenv().TeleportMode)
+        if teleportPos then
+            myRoot.CFrame = CFrame.new(teleportPos)
+        end
+    end)
+end
+
+local function disableTeleport()
+    if teleportConnection then
+        teleportConnection:Disconnect()
+        teleportConnection = nil
+    end
+    teleportTarget = nil
+end
+
+setupSharkHook()
+
+RunService.RenderStepped:Connect(function()
+    if not getgenv().MeleeRange then return end
+    if not meleeHookActive then return end
+    if not meleeWeaponCallback then return end
+    
+    local myChar = LocalPlayer.Character
+    if not myChar then return end
+    local myRoot = myChar:FindFirstChild("HumanoidRootPart")
+    if not myRoot then return end
+    
+    meleeLastAttackFrame = meleeLastAttackFrame + 1
+    if meleeLastAttackFrame > 20 then return end
+    
+    local myTeam = LocalPlayer.Team
+    local myPos = myRoot.Position
+    local attacked = {}
+    
+    for _, target in ipairs(Players:GetPlayers()) do
+        if target == LocalPlayer then continue end
+        
+        local targetChar = target.Character
+        if not targetChar then continue end
+        if attacked[targetChar] then continue end
+        
+        local targetRoot = targetChar:FindFirstChild("HumanoidRootPart")
+        if not targetRoot then continue end
+        
+        if (myPos - targetRoot.Position).Magnitude > 10 then
+            continue
+        end
+        
+        if myTeam and target.Team == myTeam then continue end
+        if not myTeam and not target.Team then continue end
+        
+        local targetHead = targetChar:FindFirstChild("Head")
+        if targetHead then
+            attacked[targetChar] = true
+            meleeWeaponCallback(targetHead)
+        end
+    end
+end)
+
+RunService.RenderStepped:Connect(function()
+    if getgenv().MeleeRange and meleeBarrier then
+        local myChar = LocalPlayer.Character
+        if myChar then
+            local myRoot = myChar:FindFirstChild("HumanoidRootPart")
+            if myRoot then
+                meleeBarrier.CFrame = myRoot.CFrame
+            end
+        end
+    end
+end)
+
 FunctionsGroup:AddToggle('AutoRespawnToggle', {
     Text = '秒复活 + 传送回原地 + 防感染',
     Default = false,
@@ -532,25 +811,11 @@ FunctionsGroup:AddToggle('AutoRespawnToggle', {
     end
 })
 
-FunctionsGroup:AddToggle('MeleeRangeToggle', {
-    Text = '近战范围增强',
-    Default = false,
-    Callback = function(value)
-        getgenv().MeleeRange = value
-        if value then
-            enableMeleeRange()
-        else
-            disableMeleeRange()
-        end
-    end
-})
-
 FunctionsGroup:AddToggle('AntiSharkToggle', {
     Text = '防鲨鱼',
     Default = false,
     Callback = function(value)
         getgenv().AntiShark = value
-        updateHook()
     end
 })
 
@@ -580,12 +845,16 @@ FunctionsGroup:AddToggle('AntiTaserToggle', {
     end
 })
 
-FunctionsGroup:AddToggle('AntiYellowBarrelToggle', {
-    Text = '防黄色桶',
+FunctionsGroup:AddToggle('MeleeRangeToggle', {
+    Text = '近战范围增强（修复版：移动追踪）',
     Default = false,
     Callback = function(value)
-        getgenv().AntiYellowBarrel = value
-        updateHook()
+        getgenv().MeleeRange = value
+        if value then
+            enableMeleeRange()
+        else
+            disableMeleeRange()
+        end
     end
 })
 
@@ -609,6 +878,105 @@ FunctionsGroup:AddButton({
     end
 })
 
+TeleportGroup:AddToggle('AutoTeleportToggle', {
+    Text = '自动传送开关',
+    Default = false,
+    Callback = function(value)
+        getgenv().AutoTeleport = value
+        if value then
+            enableTeleport()
+        else
+            disableTeleport()
+        end
+    end
+})
+
+TeleportGroup:AddDropdown('TeleportModeSelect', {
+    Text = '传送位置',
+    Values = {'脚底', '背后'},
+    Default = '脚底',
+    Callback = function(value)
+        getgenv().TeleportMode = value
+    end
+})
+
+local teleportTargetDropdown = TeleportGroup:AddDropdown('TeleportTargetSelect', {
+    Text = '选择要传送的玩家（可多选）',
+    Values = getAllPlayerNames(),
+    Default = {},
+    Multi = true,
+    AllowNull = true,
+    Callback = function(selectedValues)
+        local list = normalizeTargetList(selectedValues)
+        getgenv().TeleportTargets = list
+        if getgenv().AutoTeleport then
+            teleportTarget = getTeleportTarget()
+        end
+        Library:Notify('已选择 ' .. #list .. ' 个目标', 1)
+    end
+})
+
+local function updatePlayerList()
+    local names = getAllPlayerNames()
+    if teleportTargetDropdown and teleportTargetDropdown.SetValues then
+        teleportTargetDropdown:SetValues(names)
+    end
+end
+
+TeleportGroup:AddButton({
+    Text = '刷新玩家列表',
+    Func = function()
+        updatePlayerList()
+    end
+})
+
+TeleportGroup:AddButton({
+    Text = '清除选中目标',
+    Func = function()
+        getgenv().TeleportTargets = {}
+        if teleportTargetDropdown and teleportTargetDropdown.SetValue then
+            teleportTargetDropdown:SetValue({})
+        end
+        if getgenv().AutoTeleport then
+            teleportTarget = getTeleportTarget()
+        end
+        Library:Notify('目标已清除', 1)
+    end
+})
+
+NightvisionGroup:AddToggle('NightvisionNotifyToggle', {
+    Text = '夜视仪刷新提醒',
+    Default = false,
+    Callback = function(value)
+        getgenv().NightvisionNotify = value
+        if value then
+            startNightvisionMonitor()
+        else
+            stopNightvisionMonitor()
+        end
+    end
+})
+
+NightvisionGroup:AddToggle('NightvisionESPToggle', {
+    Text = '夜视仪文本透视',
+    Default = false,
+    Callback = function(value)
+        getgenv().NightvisionESP = value
+        if value then
+            startESP()
+        else
+            stopESP()
+        end
+    end
+})
+
+NightvisionGroup:AddButton({
+    Text = '自动获取夜视仪',
+    Func = function()
+        AutoGetNightvision()
+    end
+})
+
 local UIGroupSettings = UISettingsTab:AddLeftGroupbox('界面设置')
 UIGroupSettings:AddLabel('菜单快捷键'):AddKeyPicker("MenuKeybind", {
     Default = "RightShift",
@@ -624,29 +992,21 @@ UIGroupSettings:AddButton({
         getgenv().AutoRespawn = false
         getgenv().AntiShark = false
         getgenv().AntiZapDoor = false
-        getgenv().AntiTaser = false
-        getgenv().AntiYellowBarrel = false
-        getgenv().AutoEscape = false
         getgenv().MeleeRange = false
+        getgenv().AntiTaser = false
+        getgenv().AutoEscape = false
+        getgenv().AutoTeleport = false
+        getgenv().NightvisionNotify = false
+        getgenv().NightvisionESP = false
         
         stopRespawn()
         disableZap()
         disableMeleeRange()
         disableTaser()
         disableEscape()
-        
-        if meleeBarrier then
-            meleeBarrier:Destroy()
-            meleeBarrier = nil
-        end
-        
-        local mt = debug.getmetatable(TouchEvent)
-        if mt and originalNamecall then
-            setreadonly(mt, false)
-            mt.__namecall = originalNamecall
-            setreadonly(mt, true)
-        end
-        hookActive = false
+        disableTeleport()
+        stopNightvisionMonitor()
+        stopESP()
         
         task.wait(0.5)
         Library:Unload()
@@ -665,17 +1025,10 @@ SaveManager:SetFolder(folder_path .. '/Settings')
 SaveManager:BuildConfigSection(UISettingsTab)
 ThemeManager:ApplyToTab(UISettingsTab)
 
+Players.PlayerAdded:Connect(function() task.wait(0.5) updatePlayerList() end)
+Players.PlayerRemoving:Connect(function() task.wait(0.5) updatePlayerList() end)
+updatePlayerList()
+
 pcall(function()
     SaveManager:LoadAutoloadConfig()
-end)
-
-RunService.RenderStepped:Connect(function()
-    if not getgenv().MeleeRange then return end
-    local myChar = LocalPlayer.Character
-    if myChar and meleeBarrier then
-        local myRoot = myChar:FindFirstChild("HumanoidRootPart")
-        if myRoot then
-            meleeBarrier.CFrame = myRoot.CFrame
-        end
-    end
 end)
